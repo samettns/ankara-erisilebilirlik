@@ -1,0 +1,10 @@
+osmnx>=2.1
+networkx>=3.4
+geopandas>=1.0
+shapely>=2.0
+pandas>=2.2
+h3>=4.0
+folium>=0.17
+streamlit>=1.40
+rasterio>=1.4
+pytest>=8.0
