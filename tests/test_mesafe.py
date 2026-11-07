@@ -170,6 +170,53 @@ def test_sifir_uzunluklu_kenarda_koken_dogru():
     assert s.loc[4, "sure_dk"] == pytest.approx(1.0)
 
 
+def _site_grafi():
+    """1-2-3 kamu hattı (80 m'lik kenarlar) ve 1 ile 3 arasından geçen özel site yolu 1-10-3 (20+20 m).
+
+    11, sadece özel yolla 10'a bağlı bir site içi düğüm (30 m).
+    """
+    G = nx.Graph()
+    G.add_edge(1, 2, length=80.0, ozel=False)
+    G.add_edge(2, 3, length=80.0, ozel=False)
+    G.add_edge(1, 10, length=20.0, ozel=True)
+    G.add_edge(10, 3, length=20.0, ozel=True)
+    G.add_edge(10, 11, length=30.0, ozel=True)
+    return G
+
+
+def _bag(tesis, dugum, mesafe=0.0):
+    return pd.DataFrame({"tesis": [tesis], "dugum": [dugum], "mesafe_m": [mesafe],
+                         "baglandi": [True], "kucuk_parcaya_yakin": [False]})
+
+
+def test_iki_asama_ozel_yol_kestirme_olmaz():
+    s = mesafe.en_yakin_sureler(_site_grafi(), _bag("t", 1), hiz_m_dk=80)
+    # 3: kamu yoluyla 160 m (2 dk); özel yoldan 40 m olurdu ama site dışındaki düğüm kestirme kullanamaz
+    assert s.loc[3, "sure_dk"] == pytest.approx(2.0) and not s.loc[3, "ozel_yol"]
+    assert s.loc[2, "sure_dk"] == pytest.approx(1.0)
+
+
+def test_iki_asama_site_ici_dugumler_kapidan_sure_alir():
+    s = mesafe.en_yakin_sureler(_site_grafi(), _bag("t", 1), hiz_m_dk=80)
+    # 10: kapılar 1 (0 m) ve 3 (160 m) -> min(0+20, 160+20) = 20 m; 11: 20+30 = 50 m
+    assert s.loc[10, "sure_dk"] == pytest.approx(20 / 80) and s.loc[10, "ozel_yol"]
+    assert s.loc[11, "sure_dk"] == pytest.approx(50 / 80) and s.loc[11, "tesis"] == "t"
+    assert not s.loc[1, "ozel_yol"]
+
+
+def test_iki_asama_yakin_kapi_secilir_ve_tesis_kokeni_dogru():
+    G = _site_grafi()
+    baglantilar = pd.concat([_bag("bati", 1), _bag("dogu", 3, 10.0)], ignore_index=True)
+    s = mesafe.en_yakin_sureler(G, baglantilar, hiz_m_dk=80)
+    # 10: batı kapısı 1'den 0+20, doğu kapısı 3'ten 10+20 -> batı (20 m)
+    assert s.loc[10, "tesis"] == "bati" and s.loc[10, "sure_dk"] == pytest.approx(20 / 80)
+    assert s.loc[3, "tesis"] == "dogu" and s.loc[3, "sure_dk"] == pytest.approx(10 / 80)  # kapı süresi değişmez
+
+
+def test_kamu_dugumleri():
+    assert mesafe.kamu_dugumleri(_site_grafi()) == {1, 2, 3}
+
+
 def test_sanal_kaynak_kimligi_cakisirsa_hata():
     G = nx.Graph()
     G.add_edge(mesafe.SANAL_KAYNAK, 1, length=1.0)

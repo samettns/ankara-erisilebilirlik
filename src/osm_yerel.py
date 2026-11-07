@@ -20,6 +20,7 @@ import numpy as np
 import osmium
 import osmnx as ox
 import shapely
+import shapely.prepared
 import shapely.wkb
 from shapely.geometry import MultiPolygon, Point
 
@@ -30,8 +31,14 @@ except ModuleNotFoundError:
     from ayarlar import AG_TIPI, ILCELER, KESIT_KUTUSU, KONUM_DEPOSU
     from hedefler import HAT_REF_DESENI, HEDEF_ETIKETLERI, ham_ozellikleri_hazirla
 
+# Kesit içeriği değişince artırılır; dosya adına girer, eski kesit ve türevleri yeniden üretilir.
+# 2: landuse=residential alanları eklendi (site içi özel yollar için)
+KESIT_SURUMU = 2
 # Kesite açıkça (etiketleriyle) yazılacak nesnelerin anahtarları
-KESIT_ANAHTARLARI = ("highway", "amenity", "healthcare", "railway", "public_transport", "route", "boundary")
+KESIT_ANAHTARLARI = ("highway", "amenity", "healthcare", "railway", "public_transport", "route", "boundary", "landuse")
+# Konut alanı içinde kalırsa "son kilometre" olarak ağa eklenen özel yol tipleri
+OZEL_YOL_TIPLERI = {"service", "residential", "footway", "living_street", "pedestrian"}
+KONUT_ORAN_ESIGI = 0.5  # özel yolun düğümlerinin en az bu kadarı konut alanında olmalı
 YOL_ANAHTARLARI = ("highway", "railway", "amenity", "healthcare", "public_transport")
 NOKTA_ANAHTARLARI = ("amenity", "healthcare", "railway", "public_transport")
 HAT_TURLERI = {"subway", "light_rail", "train"}
@@ -117,6 +124,8 @@ def ankara_kesiti_cikar(
     - en az bir düğümü kutuda olan yol/raylı/sağlık yolları
     - adı ilceler'de olan admin_level=6 idari sınır ilişkileri (konuma bakılmaz,
       Ankara dışındaki adaşlar sınır okunurken elenir)
+    - kutudaki landuse=residential kapalı yolları ve tüm landuse=residential
+      multipolygon ilişkileri (Ankara dışındakiler okunurken elenir)
     - üyelerinden biri yukarıda seçilmiş olan hat (route), stop_area ve
       multipolygon ilişkileri
     Bunların referans verdiği düğüm ve yollar BackReferenceWriter ile etiketsiz
@@ -170,13 +179,20 @@ def _kesiti_yaz(pbf: Path, gecici: Path, kutu, isimler: set[str], konum_deposu: 
                     yazici.add_node(nesne)
                     secilen.add_node(nesne.id)
             elif nesne.is_way():
-                if any(a in nesne.tags for a in YOL_ANAHTARLARI) and any(_kutuda(n.location, kutu) for n in nesne.nodes):
+                ilgili = any(a in nesne.tags for a in YOL_ANAHTARLARI) or nesne.tags.get("landuse") == "residential"
+                if ilgili and any(_kutuda(n.location, kutu) for n in nesne.nodes):
                     yazici.add_way(nesne)
                     secilen.add_way(nesne.id)
             elif nesne.is_relation():
                 etiket = nesne.tags
                 ilce_siniri = (etiket.get("boundary") == "administrative" and etiket.get("admin_level") == "6"
                                and etiket.get("name") in isimler)
+                # Konut multipolygon'larının dış halkaları çoğunlukla etiketsiz yollardır; konumları bu
+                # geçişte bilinmediği için hepsi alınır, Ankara dışındakiler okunurken elenir.
+                konut = etiket.get("type") == "multipolygon" and etiket.get("landuse") == "residential"
+                if konut:
+                    yazici.add_relation(nesne)
+                    continue
                 ilgili = (etiket.get("route") in HAT_TURLERI or etiket.get("public_transport") == "stop_area"
                           or (etiket.get("type") == "multipolygon" and any(a in etiket for a in NOKTA_ANAHTARLARI)))
                 if ilce_siniri or (ilgili and secilen.contains_any_references(nesne)):
@@ -225,53 +241,108 @@ def ilce_sinirlarini_oku(
 
 # --------------------------------------------------------------------------- 3. yürüme yolları
 
+def konut_alanlarini_oku(kesit: Path, kutu: tuple[float, float, float, float] = KESIT_KUTUSU):
+    """Kesitteki landuse=residential alanlarının (kapalı yol ve multipolygon) birleşimini döndürür.
+
+    Temsilî noktası kutu dışında kalanlar (kesite konumsuz alınan Ankara
+    dışı multipolygon'lar) elenir. Alan yoksa boş geometri döner.
+    """
+    fabrika = osmium.geom.WKBFactory()
+    bati, guney, dogu, kuzey = kutu
+    alanlar = []
+    for nesne in osmium.FileProcessor(str(kesit)).with_areas():
+        if not nesne.is_area() or nesne.tags.get("landuse") != "residential":
+            continue
+        try:
+            g = _geometri(fabrika, nesne)
+        except RuntimeError:
+            continue
+        nokta = g.representative_point()
+        if bati <= nokta.x <= dogu and guney <= nokta.y <= kuzey:
+            alanlar.append(g)
+    return shapely.union_all(alanlar) if alanlar else shapely.Polygon()
+
+
+def ozel_yol_adayi_mi(etiketler: dict[str, str], kurallar: list[tuple[str, str | None]]) -> bool:
+    """Yol, sadece 'özel' olduğu için yürüme filtresine takılan bir site içi yol tipi mi?
+
+    access=private veya service=private olan, highway tipi OZEL_YOL_TIPLERI'nden
+    biri olan ve bu iki etiket dışında OSMnx filtresinin tüm kurallarını
+    geçen yollar aday sayılır. Konut alanı içinde olup olmadığı ayrıca bakılır.
+    """
+    if etiketler.get("highway") not in OZEL_YOL_TIPLERI:
+        return False
+    ozel_anahtarlar = [a for a in ("access", "service") if etiketler.get(a) == "private"]
+    if not ozel_anahtarlar:
+        return False
+    gevsek = {k: v for k, v in etiketler.items() if k not in ozel_anahtarlar}
+    return ag_filtresinden_gecer(gevsek, kurallar)
+
+
 class YuruyusYollari:
     """Kesitteki yürünebilir yolların düğüm dizileri, koordinatları ve etiketleri.
 
     Koordinatlar tek bir düz dizide tutulur; i. yolun düğümleri
     baslangic[i]:baslangic[i+1] aralığındadır. Bu yapı, bir ilçe
     poligonuna değen yolları vektörel olarak seçmeyi sağlar.
+    ozel[i]: i. yol konut sitesi içindeki özel yol ("son kilometre") mu.
     """
 
-    def __init__(self, yol_idleri, etiketler, dugum_idleri, lon, lat, baslangic):
+    def __init__(self, yol_idleri, etiketler, dugum_idleri, lon, lat, baslangic, ozel=None):
         self.yol_idleri = np.asarray(yol_idleri, dtype=np.int64)
         self.etiketler = etiketler
         self.dugum_idleri = np.asarray(dugum_idleri, dtype=np.int64)
         self.lon = np.asarray(lon, dtype=float)
         self.lat = np.asarray(lat, dtype=float)
         self.baslangic = np.asarray(baslangic, dtype=np.int64)
+        self.ozel = np.zeros(len(self.yol_idleri), dtype=bool) if ozel is None else np.asarray(ozel, dtype=bool)
 
     def __len__(self) -> int:
         return len(self.yol_idleri)
 
 
-def yuruyus_yollarini_topla(kesit: Path, ag_tipi: str = AG_TIPI) -> YuruyusYollari:
-    """Kesitten OSMnx ağ filtresinden geçen yolları toplar.
+def yuruyus_yollarini_topla(kesit: Path, konut_alani=None, ag_tipi: str = AG_TIPI,
+                            oran_esigi: float = KONUT_ORAN_ESIGI) -> YuruyusYollari:
+    """Kesitten OSMnx ağ filtresinden geçen yolları ve konut sitelerindeki özel yolları toplar.
 
-    Konumu geçersiz düğüm içeren yollar atlanır (kesit referans-tam olduğu
-    için normalde olmaz). Etiketlerden sadece OSMnx'in kullandığı yol
-    etiketleri tutulur.
+    konut_alani verilirse, ozel_yol_adayi_mi olan ve düğümlerinin en az
+    oran_esigi kadarı konut alanında kalan yollar ozel=True ile eklenir; bu
+    yollara access=private yazılır (sadeleştirme ve iki aşamalı hesap için).
+    Konumu geçersiz düğüm içeren yollar atlanır. Etiketlerden sadece OSMnx'in
+    kullandığı yol etiketleri tutulur.
     """
     kurallar = ag_filtresi_kurallari(ag_tipi)
     tutulacak = set(ox.settings.useful_tags_way) | {"highway"}
-    yol_idleri, etiketler, dugumler, lon, lat, baslangic = [], [], [], [], [], [0]
+    konut = shapely.prepared.prep(konut_alani) if konut_alani is not None and not konut_alani.is_empty else None
+    yol_idleri, etiketler, dugumler, lon, lat, baslangic, ozel = [], [], [], [], [], [0], []
     isleyici = osmium.FileProcessor(str(kesit)).with_locations().with_filter(osmium.filter.KeyFilter("highway"))
     for yol in isleyici:
         if not yol.is_way():
             continue
         etiket = _etiketler(yol)
-        if not ag_filtresinden_gecer(etiket, kurallar):
+        kamu = ag_filtresinden_gecer(etiket, kurallar)
+        aday = not kamu and konut is not None and ozel_yol_adayi_mi(etiket, kurallar)
+        if not (kamu or aday):
             continue
         if not all(n.location.valid() for n in yol.nodes) or len(yol.nodes) < 2:
             continue
+        xy = [(n.lon, n.lat) for n in yol.nodes]
+        if aday:
+            icerde = sum(konut.contains(shapely.Point(x, y)) for x, y in xy)
+            if icerde < oran_esigi * len(xy):
+                continue
         yol_idleri.append(yol.id)
-        etiketler.append({k: v for k, v in etiket.items() if k in tutulacak})
-        for n in yol.nodes:
+        sade = {k: v for k, v in etiket.items() if k in tutulacak}
+        if aday:
+            sade["access"] = "private"  # service=private olanlar da tek etiketle işaretlenir
+        etiketler.append(sade)
+        ozel.append(aday)
+        for n, (x, y) in zip(yol.nodes, xy):
             dugumler.append(n.ref)
-            lon.append(n.lon)
-            lat.append(n.lat)
+            lon.append(x)
+            lat.append(y)
         baslangic.append(len(dugumler))
-    return YuruyusYollari(yol_idleri, etiketler, dugumler, lon, lat, baslangic)
+    return YuruyusYollari(yol_idleri, etiketler, dugumler, lon, lat, baslangic, ozel)
 
 
 def poligona_degen_yollar(yollar: YuruyusYollari, poligon) -> np.ndarray:

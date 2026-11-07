@@ -72,9 +72,9 @@ def sinirlari_hazirla(kesit: Path, yol: Path = SINIR_DOSYASI) -> gpd.GeoDataFram
 def ilce_aglarini_kur(kesit: Path, genis: dict, ag_dosyalari: dict, gecici_dizin: Path = GECICI_DIZIN) -> list[str]:
     """Güncel olmayan ilçe ağlarını kurar; hata veren ilçelerin adlarını döndürür.
 
-    Yürüme yolları kesitten bir kez toplanır; her ilçe için genişletilmiş
-    poligona değen yollar geçici bir .osm XML'e yazılır, OSMnx ile graf
-    kurulur ve XML her durumda silinir.
+    Yürüme yolları (konut sitelerindeki özel yollar dahil) kesitten bir kez
+    toplanır; her ilçe için genişletilmiş poligona değen yollar geçici bir
+    .osm XML'e yazılır, OSMnx ile graf kurulur ve XML her durumda silinir.
     """
     yapilacak = [i for i in genis if not guncel_mi(ag_dosyalari[i], [kesit])]
     for ilce in genis:
@@ -84,8 +84,10 @@ def ilce_aglarini_kur(kesit: Path, genis: dict, ag_dosyalari: dict, gecici_dizin
         return []
 
     baslangic = time.time()
-    yollar = osm_yerel.yuruyus_yollarini_topla(kesit)
-    print(f"  kesitte {len(yollar):,} yürünebilir yol ({time.time() - baslangic:.0f} sn)", flush=True)
+    konut = osm_yerel.konut_alanlarini_oku(kesit)
+    yollar = osm_yerel.yuruyus_yollarini_topla(kesit, konut_alani=konut)
+    print(f"  kesitte {len(yollar):,} yürünebilir yol; bunların {int(yollar.ozel.sum()):,} tanesi konut sitesi "
+          f"içi özel yol ({time.time() - baslangic:.0f} sn)", flush=True)
 
     eksikler = []
     for ilce in yapilacak:
@@ -188,7 +190,8 @@ def main() -> None:
     print(f"  {pbf.name}, OSM veri tarihi {surum['osm_veri_tarihi']}", flush=True)
 
     print("2/5 Ankara kesiti", flush=True)
-    kesit = OSM_DIZINI / pbf.name.replace("turkey-", "ankara-")
+    # Kesit sürümü dosya adında: kesit içeriği değişince yeni kesit ve tüm türevleri yeniden üretilir
+    kesit = OSM_DIZINI / pbf.name.replace("turkey-", "ankara-").replace(".osm.pbf", f"-k{osm_yerel.KESIT_SURUMU}.osm.pbf")
     baslangic = time.time()
     kesit_vardi = kesit.exists()
     osm_yerel.ankara_kesiti_cikar(pbf, kesit)

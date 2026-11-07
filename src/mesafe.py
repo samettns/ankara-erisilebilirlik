@@ -89,9 +89,11 @@ def kaynaklari_baglat(
     """Her hedef noktasını ana parçadaki en yakın düğüme bağlar.
 
     kaynaklar: 'tesis' (tesis kimliği) sütunu ve EPSG:4326 noktalar.
-    dugumler: dugum_tablosu çıktısı. Mesafeler metrik projeksiyonda ölçülür.
+    dugumler: dugum_tablosu çıktısı. ana_parca: bağlanılabilecek düğümler
+    (ana parçanın kamuya açık kenarı olan düğümleri). Mesafeler metrik
+    projeksiyonda ölçülür.
     Döner: tesis, dugum, mesafe_m, baglandi (mesafe <= esik_m) ve
-    kucuk_parcaya_yakin (tüm graftaki en yakın düğüm ana parçada değil).
+    kucuk_parcaya_yakin (tüm graftaki en yakın düğüm bağlanılabilir değil).
     """
     sutunlar = ["tesis", "dugum", "mesafe_m", "baglandi", "kucuk_parcaya_yakin"]
     if kaynaklar.empty:
@@ -169,39 +171,78 @@ def _kokenleri_bul(onculler: dict, baslangic_tesisi: dict) -> dict:
     return koken
 
 
+def kamu_dugumleri(H: nx.Graph) -> set:
+    """En az bir kamuya açık (ozel olmayan) kenarı olan düğümler."""
+    return {n for u, v, d in H.edges(data=True) if not d.get("ozel", False) for n in (u, v)}
+
+
+def _super_kaynakli_dijkstra(G: nx.Graph, baslangic: dict, gorunum=None) -> tuple[dict, dict]:
+    """baslangic {düğüm: ilk mesafe} ile sanal süper kaynaktan Dijkstra; (öncüller, mesafeler).
+
+    Sanal kaynak ve kenarları G'ye eklenir; arama gorunum (G'nin bir
+    alt-görünümü, ör. sadece kamu kenarları) üzerinde yapılır, verilmezse G.
+    G her durumda eski haline döndürülür. Dönen mesafelerde sanal kaynak yoktur.
+    """
+    if SANAL_KAYNAK in G:
+        raise ValueError(f"Grafta zaten {SANAL_KAYNAK} kimlikli düğüm var")
+    G.add_node(SANAL_KAYNAK)
+    try:
+        G.add_edges_from((SANAL_KAYNAK, d, {"length": float(m), "ozel": False}) for d, m in baslangic.items())
+        onculler, mesafeler = nx.dijkstra_predecessor_and_distance(
+            G if gorunum is None else gorunum, SANAL_KAYNAK, weight="length")
+    finally:
+        G.remove_node(SANAL_KAYNAK)
+    mesafeler.pop(SANAL_KAYNAK, None)
+    return onculler, mesafeler
+
+
 def en_yakin_sureler(
     H: nx.Graph,
     baglantilar: pd.DataFrame,
     hiz_m_dk: float = YURUME_HIZI_M_DK,
 ) -> pd.DataFrame:
-    """Sanal süper kaynakla tek Dijkstra; her düğüm için süre (dk) ve en yakın tesis.
+    """İki aşamalı Dijkstra; her düğüm için süre (dk), en yakın tesis ve ozel_yol bayrağı.
 
-    Sadece baglandi=True noktalar kullanılır. Aynı düğüme birden fazla nokta
-    bağlanırsa en kısa bağlantı mesafeli olan kalır. H geçici olarak
-    değiştirilir ve her durumda eski haline döndürülür. Ulaşılamayan düğümler
-    sonuçta yer almaz.
+    1. Sadece kamuya açık kenarlarda (ozel=False), sanal süper kaynaktan
+       Dijkstra. Kaynak kenarlarının ağırlığı bağlantı mesafesidir.
+    2. Sadece özel kenarlarda (konut sitesi içi yollar), 1. aşamada süresi
+       bulunan "kapı" düğümlerinden o sürelerle başlayan ikinci Dijkstra.
+       Yalnızca 1. aşamada ulaşılamayan düğümler bu aşamadan süre alır; bu
+       yüzden kamu düğümlerinin süresi değişmez, özel yol kestirme olamaz.
+
+    Sadece baglandi=True noktalar kullanılır; aynı düğüme bağlanan noktalardan
+    en kısa bağlantılı olan kalır. Ulaşılamayan düğümler sonuçta yer almaz.
     """
+    bos = pd.DataFrame({"sure_dk": pd.Series(dtype=float), "tesis": pd.Series(dtype=object),
+                        "ozel_yol": pd.Series(dtype=bool)}, index=pd.Index([], name="osmid"))
     bagli = baglantilar[baglantilar["baglandi"]].sort_values(["dugum", "mesafe_m", "tesis"])
     bagli = bagli.drop_duplicates("dugum")
     if bagli.empty:
-        return pd.DataFrame(columns=["sure_dk", "tesis"], index=pd.Index([], name="osmid"))
-    if SANAL_KAYNAK in H:
-        raise ValueError(f"Grafta zaten {SANAL_KAYNAK} kimlikli düğüm var")
+        return bos
 
-    H.add_node(SANAL_KAYNAK)
-    try:
-        H.add_edges_from((SANAL_KAYNAK, int(d), {"length": float(m)})
-                         for d, m in zip(bagli["dugum"], bagli["mesafe_m"]))
-        onculler, mesafeler = nx.dijkstra_predecessor_and_distance(H, SANAL_KAYNAK, weight="length")
-    finally:
-        H.remove_node(SANAL_KAYNAK)
-
+    # 1. aşama: kamu ağı (sanal kaynağın kenarları da ozel=False olduğundan görünümde kalır)
+    kamu = nx.subgraph_view(H, filter_edge=lambda u, v: not H[u][v].get("ozel", False))
+    baslangic = {int(d): float(m) for d, m in zip(bagli["dugum"], bagli["mesafe_m"])}
+    onculler, mesafeler = _super_kaynakli_dijkstra(H, baslangic, gorunum=kamu)
     koken = _kokenleri_bul(onculler, dict(zip(bagli["dugum"].astype(int), bagli["tesis"])))
-    mesafeler.pop(SANAL_KAYNAK, None)
+    ozel_yol = dict.fromkeys(mesafeler, False)
+
+    # 2. aşama: sadece özel kenarlar, kapılardan içeri
+    O = nx.Graph()
+    O.add_edges_from((u, v, d) for u, v, d in H.edges(data=True) if d.get("ozel", False))
+    kapilar = {n: mesafeler[n] for n in O if n in mesafeler}
+    if kapilar:
+        onculler2, mesafeler2 = _super_kaynakli_dijkstra(O, kapilar)
+        koken2 = _kokenleri_bul(onculler2, {k: koken[k] for k in kapilar})
+        for d, m in mesafeler2.items():
+            if d not in mesafeler:
+                mesafeler[d], koken[d], ozel_yol[d] = m, koken2[d], True
+
     osmid = np.fromiter(mesafeler.keys(), dtype=np.int64, count=len(mesafeler))
     return pd.DataFrame({
         "sure_dk": np.fromiter(mesafeler.values(), dtype=float, count=len(mesafeler)) / hiz_m_dk,
         "tesis": [koken[d] for d in osmid],
+        "ozel_yol": [ozel_yol[d] for d in osmid],
     }, index=pd.Index(osmid, name="osmid"))
 
 
@@ -279,9 +320,15 @@ def main() -> None:
     parca_ozeti["disarida_dugum_ilce_ici"] = int(disarida["ilce"].notna().sum())
     parca_ozeti["disarida_dugum_ilceye_gore"] = disarida["ilce"].value_counts().to_dict()
     G.remove_nodes_from([n for n in G.nodes if n not in ana_parca])
+    kamu = kamu_dugumleri(G)
+    ozel_kenar = sum(1 for _, _, d in G.edges(data=True) if d.get("ozel", False))
+    parca_ozeti["ozel_kenar"] = ozel_kenar
+    parca_ozeti["sadece_ozel_yol_dugumu"] = len(ana_parca) - len(kamu)
     print(f"Graf: {parca_ozeti['ana_parca_dugum']:,} düğüm ana parçada; {parca_ozeti['parca_sayisi'] - 1} küçük "
           f"parçada {parca_ozeti['disarida_dugum']:,} düğüm dışarıda "
           f"(7 ilçe içinde {parca_ozeti['disarida_dugum_ilce_ici']:,}) ({time.time() - baslangic:.0f} sn)")
+    print(f"Konut sitesi özel yolları: {ozel_kenar:,} kenar, sadece özel yola bağlı "
+          f"{parca_ozeti['sadece_ozel_yol_dugumu']:,} düğüm (2. aşamada süre alır)")
 
     sonuc = dugumler.loc[dugumler.index.isin(list(ana_parca)), ["x", "y", "ilce"]].copy()
     ilce_ici = sonuc["ilce"].notna()
@@ -290,10 +337,13 @@ def main() -> None:
 
     for kategori in KATEGORILER:
         t0 = time.time()
-        baglantilar = kaynaklari_baglat(kaynaklar[kategori], dugumler, ana_parca)
+        # Tesisler sadece kamuya açık kenarı olan düğümlere bağlanır (site içine değil)
+        baglantilar = kaynaklari_baglat(kaynaklar[kategori], dugumler, kamu)
         sureler = en_yakin_sureler(G, baglantilar)
         sonuc[f"{kategori}_dk"] = sureler["sure_dk"].reindex(sonuc.index)
         sonuc[f"{kategori}_id"] = sureler["tesis"].reindex(sonuc.index)
+        if kategori == KATEGORILER[0]:
+            sonuc["ozel_yol"] = sureler["ozel_yol"].reindex(sonuc.index).fillna(False).astype(bool)
         sure_sn = time.time() - t0
 
         tesis = tesis_raporu(baglantilar)

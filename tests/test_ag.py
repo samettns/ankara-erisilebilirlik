@@ -37,7 +37,7 @@ def test_sadelestir_yonsuz_en_kisa_ve_sadece_length():
     H = ag.sadelestir(_osmnx_grafi())
     assert isinstance(H, nx.Graph) and not H.is_directed() and not H.is_multigraph()
     assert H.number_of_edges() == 2
-    assert H[1][2] == {"length": 90.0}
+    assert H[1][2] == {"length": 90.0, "ozel": False}
     assert not H.has_edge(3, 3)
     assert H.nodes[1] == {"x": 32.850, "y": 39.90}
 
@@ -69,6 +69,42 @@ def test_sade_graf_kaydet_oku(tmp_path):
     assert set(G.nodes) == {1, 2, 3}
     assert G[2][3]["length"] == pytest.approx(85.0)
     assert G.nodes[1]["x"] == pytest.approx(32.85)
+
+
+def test_ilce_agi_kur_erisim_degisiminde_kenari_boler(tmp_path):
+    # 1-2-3 kamu yolu, 3-4-5 site içi özel yol; 3 sadece iki yolu birleştiriyor (derece 2)
+    xml = tmp_path / "site.osm"
+    dugumler = "".join(f'<node id="{i}" lat="39.9" lon="{32.85 + i * 0.001}"/>' for i in range(1, 6))
+    xml.write_text(
+        f"<?xml version='1.0' encoding='UTF-8'?>\n<osm version=\"0.6\" generator=\"test\">{dugumler}"
+        '<way id="10"><nd ref="1"/><nd ref="2"/><nd ref="3"/><tag k="highway" v="residential"/></way>'
+        '<way id="20"><nd ref="3"/><nd ref="4"/><nd ref="5"/><tag k="highway" v="service"/>'
+        '<tag k="access" v="private"/></way></osm>', encoding="utf-8")
+    G = ag.ilce_agi_kur(xml, tmp_path / "site.graphml")
+    assert set(G.nodes) == {1, 3, 5}  # kapı düğümü 3 korunur, 2 ve 4 sadeleşir
+    H = ag.sadelestir(G)
+    assert H[1][3]["ozel"] is False and H[3][5]["ozel"] is True
+
+
+def test_sadelestir_kamu_kenari_ozelden_oncelikli():
+    G = nx.MultiDiGraph(crs="EPSG:4326")
+    G.add_node(1, x=0.0, y=0.0)
+    G.add_node(2, x=1.0, y=0.0)
+    G.add_edge(1, 2, length=50.0, access="private")  # kısa ama özel (kestirme)
+    G.add_edge(1, 2, length=90.0)  # uzun ama kamu
+    G.add_edge(2, 1, length=40.0, access=["private", "yes"])  # birleşmiş kenarda liste
+    H = ag.sadelestir(G)
+    assert H[1][2] == {"length": 90.0, "ozel": False}
+
+
+def test_birlestir_ozel_onceligi_korunur():
+    a, b = nx.Graph(), nx.Graph()
+    for G in (a, b):
+        G.add_node(1, x=0.0, y=0.0)
+        G.add_node(2, x=1.0, y=0.0)
+    a.add_edge(1, 2, length=30.0, ozel=True)
+    b.add_edge(1, 2, length=80.0, ozel=False)
+    assert ag.birlestir([a, b])[1][2] == {"length": 80.0, "ozel": False}
 
 
 def test_ilce_agi_kur_xmlden_iki_yonlu_ve_tum_bilesenler(tmp_path):

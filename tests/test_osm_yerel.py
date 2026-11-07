@@ -44,6 +44,12 @@ SAHTE_TURKIYE = "\n".join([
     _dugum(36, 32.33, 39.32),
     _dugum(41, 32.330, 39.330), _dugum(42, 32.335, 39.330), _dugum(43, 32.335, 39.335), _dugum(44, 32.330, 39.335),
     _dugum(51, 29.0, 41.0, railway="stop"), _dugum(52, 29.01, 41.0),
+    # konut sitesi (32.36-32.37, 39.36-39.37) ve özel yollar
+    _dugum(61, 32.36, 39.36), _dugum(62, 32.37, 39.36), _dugum(63, 32.37, 39.37), _dugum(64, 32.36, 39.37),
+    _dugum(65, 32.362, 39.362), _dugum(66, 32.364, 39.362),  # site içi
+    _dugum(67, 32.38, 39.38), _dugum(68, 32.382, 39.38),  # site dışı
+    _dugum(69, 32.365, 39.365), _dugum(70, 32.366, 39.365),  # site içi
+    _dugum(71, 32.367, 39.366), _dugum(72, 32.368, 39.366),  # site içi
     # yollar
     _yol(101, [1, 2]), _yol(102, [2, 3]), _yol(103, [3, 4, 1]), _yol(104, [5, 6, 7, 5]),
     _yol(201, [11, 12], highway="footway"),
@@ -54,6 +60,11 @@ SAHTE_TURKIYE = "\n".join([
     _yol(301, [41, 42, 43, 44, 41], amenity="hospital", name="Test Hastanesi", operator__type="government"),
     _yol(401, [33, 36], railway="subway"),
     _yol(402, [51, 52], railway="subway"),
+    _yol(501, [61, 62, 63, 64, 61], landuse="residential", name="Örnek Sitesi"),
+    _yol(502, [65, 66], highway="service", access="private"),  # site içi: dahil
+    _yol(503, [67, 68], highway="service", access="private"),  # site dışı: hariç
+    _yol(504, [69, 70], highway="tertiary", access="private"),  # tip uygun değil: hariç
+    _yol(505, [71, 72], highway="service", service="private"),  # service=private: dahil
     # ilişkiler
     _iliski(1001, [("way", 101, "outer"), ("way", 102, "outer"), ("way", 103, "outer")],
             type="boundary", boundary="administrative", admin_level="6", name="Çankaya"),
@@ -112,6 +123,19 @@ def test_ag_filtresinden_gecer(etiket, beklenen):
     assert osm_yerel.ag_filtresinden_gecer(etiket, osm_yerel.ag_filtresi_kurallari("walk")) is beklenen
 
 
+@pytest.mark.parametrize("etiket, beklenen", [
+    ({"highway": "service", "access": "private"}, True),
+    ({"highway": "residential", "service": "private"}, True),
+    ({"highway": "footway", "access": "private"}, True),
+    ({"highway": "service", "access": "private", "foot": "no"}, False),  # başka kurala da takılıyor
+    ({"highway": "tertiary", "access": "private"}, False),  # site içi yol tipi değil
+    ({"highway": "service"}, False),  # özel değil (zaten kamu ağında)
+    ({"highway": "service", "access": "destination"}, False),
+])
+def test_ozel_yol_adayi_mi(etiket, beklenen):
+    assert osm_yerel.ozel_yol_adayi_mi(etiket, osm_yerel.ag_filtresi_kurallari("walk")) is beklenen
+
+
 def test_hedef_etiketi_mi():
     assert osm_yerel.hedef_etiketi_mi({"amenity": "pharmacy"})
     assert osm_yerel.hedef_etiketi_mi({"healthcare": "dentist"})  # healthcare: True
@@ -130,6 +154,8 @@ def test_kesit_icerigi(kesit):
     assert icerik["w"][101] == {}  # sadece referans: etiketsiz ama var
     assert {1001, 1002, 2001, 2002} <= set(icerik["r"])  # adaş sınır da gelir, okurken elenir
     assert 2003 not in icerik["r"] and 402 not in icerik["w"]  # İstanbul'daki hat
+    assert icerik["w"][501]["landuse"] == "residential"  # konut alanı etiketleriyle
+    assert {502, 503, 504, 505} <= set(icerik["w"])  # özel yollar kesitte (eleme sonra)
 
 
 def test_kesit_sureci_hata_verirse_temizler_ve_yukseltir(tmp_path):
@@ -173,6 +199,23 @@ def test_yuruyus_yollari_ve_poligon_secimi(kesit):
     assert sorted(secilen.tolist()) == [201, 205]  # 205 sınırı kesiyor, tamamen dahil
     uzak = box(32.9, 39.9, 33.0, 40.0)
     assert len(osm_yerel.poligona_degen_yollar(yollar, uzak)) == 0
+
+
+def test_konut_alanlarini_oku(kesit):
+    alan = osm_yerel.konut_alanlarini_oku(kesit, KUTU)
+    assert alan.equals(box(32.36, 39.36, 32.37, 39.37))
+    assert osm_yerel.konut_alanlarini_oku(kesit, (40.0, 40.0, 41.0, 41.0)).is_empty
+
+
+def test_yuruyus_yollari_konut_ici_ozel_yollar(kesit):
+    yollar = osm_yerel.yuruyus_yollarini_topla(kesit, konut_alani=osm_yerel.konut_alanlarini_oku(kesit, KUTU))
+    idler = yollar.yol_idleri.tolist()
+    assert sorted(idler) == [201, 205, 502, 505]  # 503 site dışı, 504 tertiary
+    ozel = dict(zip(idler, yollar.ozel.tolist()))
+    assert ozel == {201: False, 205: False, 502: True, 505: True}
+    assert yollar.etiketler[idler.index(505)]["access"] == "private"  # service=private de işaretlenir
+    # konut alanı verilmezse eskisi gibi sadece kamu yolları
+    assert sorted(osm_yerel.yuruyus_yollarini_topla(kesit).yol_idleri.tolist()) == [201, 205]
 
 
 def test_xml_yaz_ve_graf_kur(kesit, tmp_path):
