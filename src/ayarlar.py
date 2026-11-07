@@ -9,6 +9,7 @@ OSM_DIZINI = VERI_DIZINI / "osm"  # Türkiye PBF ve Ankara kesiti
 AG_DIZINI = VERI_DIZINI / "ag"  # ilçe başına ham OSMnx yürüme ağları
 HAM_DIZINI = VERI_DIZINI / "ham"  # kesitten okunmuş ham hedef özellikleri ve hatlar
 HEDEF_DIZINI = VERI_DIZINI / "hedefler"  # temizlenmiş hedef katmanları
+SONUC_DIZINI = VERI_DIZINI / "sonuclar"  # düğüm başına yürüme süreleri ve raporlar
 GECICI_DIZIN = VERI_DIZINI / "tmp"  # geçici .osm XML dosyaları; iş bitince silinir
 SINIR_DOSYASI = VERI_DIZINI / "sinirlar.gpkg"
 BIRLESIK_AG_DOSYASI = VERI_DIZINI / "ankara_walk.graphml"
@@ -29,6 +30,8 @@ GENISLETME_M = 2000  # sınırdakilerin komşu ilçedeki hedeflere ulaşabilmesi
 
 # Analiz sabitleri
 YURUME_HIZI_M_DK = 80
+BAGLANTI_ESIGI_M = 200  # hedef noktası en yakın ağ düğümüne bundan uzaksa analize girmez
+ESIK_DK = 15  # "15 dakikalık şehir" eşiği
 H3_COZUNURLUK = 9
 AG_TIPI = "walk"
 

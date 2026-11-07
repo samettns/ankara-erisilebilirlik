@@ -18,7 +18,7 @@ haritalamak. "15 dakikalık şehir" analizi.
 
 \- Yürüme ağı: network\_type="walk", merkez ilçeler
 
-\- Mesafe: networkx.multi\_source\_dijkstra\_path\_length (kategori başına tek çalıştırma)
+\- Mesafe: sanal süper kaynak düğümü (her hedef noktasından en yakın ağ düğümüne bağlantı mesafesi kenar ağırlığı, eşik 200 m) + networkx.dijkstra\_predecessor\_and\_distance (kategori başına tek çalıştırma; en yakın tesis öncül zincirinden). Analiz en büyük bağlı parçada yapılır
 
 \- Yürüme hızı: 80 m/dk
 
