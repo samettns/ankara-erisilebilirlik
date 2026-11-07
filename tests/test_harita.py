@@ -65,6 +65,25 @@ def test_altigen_geojson_bagli_olanlar_ve_kisa_ozellikler():
     assert all(len(str(v).split(".")[1]) <= harita.ONDALIK for nokta in halka for v in nokta)
 
 
+@pytest.mark.parametrize("n, metin, soluk", [
+    (0.0, "<10", True), (9.99, "<10", True), (float("nan"), "<10", True),
+    (10.0, "~10", False), (37.4, "~40", False), (1236.0, "~1.240", False), (15_004.0, "~15.000", False),
+])
+def test_nufus_metni_ve_soluk(n, metin, soluk):
+    assert harita.nufus_metni(n) == metin
+    assert harita.soluk_mu(n) is soluk
+
+
+def test_altigen_geojson_nufus_ve_soluk_bayragi():
+    a = _altigenler()
+    a["nufus"] = [4.0, 500.0]
+    p = harita.altigen_geojson(a, KATEGORILER)["features"][0]["properties"]
+    assert p["p"] == "<10" and p["f"] == 1
+    a["nufus"] = [1236.0, 0.0]
+    p = harita.altigen_geojson(a, KATEGORILER)["features"][0]["properties"]
+    assert p["p"] == "~1.240" and "f" not in p
+
+
 def test_bagsiz_geojson():
     g = harita.bagsiz_geojson(_altigenler())
     assert [f["properties"]["bilgi"] for f in g["features"]] == ["Ağa bağlı değil · Mamak · 3 düğüm"]
@@ -99,7 +118,7 @@ def test_harita_olustur_html(tmp_path):
 
     for parca in ["Eczane", "Hastane", "Tesisler", "Ağa bağlı değil", "İlçe sınırları",
                   "baselayerchange", "Temel Eczanesi", "Temel &amp; Oğulları Eczanesi", "0–5 dk", "30+ dk",
-                  "Tesis (7 ilçe dışı)"]:
+                  "Tesis (7 ilçe dışı)", "kişiden az nüfus", "Nüfus: "]:
         # folium katman adlarını JSON içinde \\u kaçışlı yazar; iki biçim de kabul
         assert parca in metin or json.dumps(parca)[1:-1] in metin, parca
     assert "World_Light_Gray_Base" in metin and "cartocdn" not in metin

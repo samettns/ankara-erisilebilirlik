@@ -23,11 +23,11 @@ from jinja2 import Template
 
 try:
     from src.altigen import tesis_tablosu
-    from src.ayarlar import HEDEF_DIZINI, SINIR_DOSYASI, SONUC_DIZINI
+    from src.ayarlar import HEDEF_DIZINI, SINIR_DOSYASI, SOLUK_NUFUS_ESIGI, SONUC_DIZINI
     from src.mesafe import KATEGORILER
 except ModuleNotFoundError:
     from altigen import tesis_tablosu
-    from ayarlar import HEDEF_DIZINI, SINIR_DOSYASI, SONUC_DIZINI
+    from ayarlar import HEDEF_DIZINI, SINIR_DOSYASI, SOLUK_NUFUS_ESIGI, SONUC_DIZINI
     from mesafe import KATEGORILER
 
 ETIKETLER = {
@@ -52,6 +52,7 @@ DIS_TESIS_OPAKLIK = 0.4  # 7 ilçe dışındaki (2 km kenar bölgesi) tesisler
 YUZEY = "#fcfcfb"
 ONDALIK = 5  # ~1 m
 UST_SINIR_DK = 60  # bilgi kutusunda bunun üstü "60+ dk"
+SOLUK_OPAKLIK = 0.25  # nüfusu SOLUK_NUFUS_ESIGI'nin altındaki altıgenler
 
 
 def _bos_mu(dk) -> bool:
@@ -93,6 +94,21 @@ def sure_metni(dk) -> str:
     return "<1 dk" if d == 0 else f"{d} dk"
 
 
+def nufus_metni(n) -> str:
+    """Bilgi kutusundaki nüfus: 10'un altı '<10', üstü onluğa yuvarlanmış ve '~' ile ('~1.240').
+
+    Yuvarlama, modelden gelen (WorldPop) tahminin sahte hassasiyetle okunmasını önler.
+    """
+    if _bos_mu(n) or n < SOLUK_NUFUS_ESIGI:
+        return f"<{SOLUK_NUFUS_ESIGI}"
+    return "~" + f"{int(round(n, -1)):,}".replace(",", ".")
+
+
+def soluk_mu(n) -> bool:
+    """Altıgen nüfusu eşiğin altındaysa (veya bilinmiyorsa) haritada soluk çizilir."""
+    return _bos_mu(n) or n < SOLUK_NUFUS_ESIGI
+
+
 def _halka(hucre: str) -> list[list[float]]:
     """H3 hücresinin kapalı sınır halkası, [boylam, enlem] ve ONDALIK basamak."""
     halka = [[round(lng, ONDALIK), round(lat, ONDALIK)] for lat, lng in h3.cell_to_boundary(hucre)]
@@ -104,20 +120,24 @@ def altigen_geojson(altigenler: pd.DataFrame, kategoriler: list[str] = KATEGORIL
 
     properties: i=ilçe, n=düğüm sayısı, s=[kategori başına aralık sırası],
     t=[süre metni (sure_metni), boşsa ''], a=[en yakın tesis adı (HTML kaçışlı)].
+    'nufus' sütunu varsa ayrıca p=nüfus metni ve (eşik altındaysa) f=1 (soluk).
     """
+    nufus_var = "nufus" in altigenler.columns
     ozellikler = []
     for h, satir in altigenler[altigenler["bagli"]].iterrows():
-        ozellikler.append({
-            "type": "Feature",
-            "geometry": {"type": "Polygon", "coordinates": [_halka(h)]},
-            "properties": {
-                "i": satir["ilce"],
-                "n": int(satir["dugum"]),
-                "s": [aralik_sinifi(satir[f"{k}_dk"]) for k in kategoriler],
-                "t": [html.escape(sure_metni(satir[f"{k}_dk"])) for k in kategoriler],
-                "a": [html.escape(str(satir[f"{k}_ad"])) if isinstance(satir[f"{k}_ad"], str) else "" for k in kategoriler],
-            },
-        })
+        p = {
+            "i": satir["ilce"],
+            "n": int(satir["dugum"]),
+            "s": [aralik_sinifi(satir[f"{k}_dk"]) for k in kategoriler],
+            "t": [html.escape(sure_metni(satir[f"{k}_dk"])) for k in kategoriler],
+            "a": [html.escape(str(satir[f"{k}_ad"])) if isinstance(satir[f"{k}_ad"], str) else "" for k in kategoriler],
+        }
+        if nufus_var:
+            p["p"] = nufus_metni(satir["nufus"])
+            if soluk_mu(satir["nufus"]):
+                p["f"] = 1
+        ozellikler.append({"type": "Feature", "geometry": {"type": "Polygon", "coordinates": [_halka(h)]},
+                           "properties": p})
     return {"type": "FeatureCollection", "features": ozellikler}
 
 
@@ -173,6 +193,8 @@ class KategoriKatmani(MacroElement):
   function stil(f) {
     var s = f.properties.s[secili];
     var renk = s < 0 ? "{{ this.bagsiz }}" : renkler[s];
+    // Nüfusu eşiğin altındaki altıgenler soluk; kenar çizgisi yok (yarı saydam kenarlar üst üste binip çizgi yapar)
+    if (f.properties.f) return {fillColor: renk, fillOpacity: {{ this.soluk_opaklik }}, stroke: false};
     return {fillColor: renk, fillOpacity: 0.85, color: renk, opacity: 0.85, weight: 1};
   }
   function noktaYaricapi() { var z = harita.getZoom(); return z >= 15 ? 5 : (z >= 13 ? 3.5 : 2); }
@@ -180,7 +202,8 @@ class KategoriKatmani(MacroElement):
     var p = f.properties;
     var sure = p.t[secili] || "hesaplanamadı";
     var yakin = p.a[secili] ? "<br>En yakın: " + p.a[secili] : "";
-    return "<b>" + etiketler[secili] + ": " + sure + "</b>" + yakin +
+    var nufusSatiri = p.p ? "<br>Nüfus: " + p.p + (p.f ? " (seyrek)" : "") : "";
+    return "<b>" + etiketler[secili] + ": " + sure + "</b>" + yakin + nufusSatiri +
            "<br><span style='color:#6b6a66'>" + p.i + " · " + p.n + " düğüm</span>";
   }
   var altigenler = L.geoJSON({{ this.altigen }}, {
@@ -222,6 +245,10 @@ class KategoriKatmani(MacroElement):
     }).join("");
     document.querySelector(".erisim-lejant").innerHTML =
       "<b>" + etiketler[secili] + " · yürüme süresi</b>" + satirlar +
+      // Soluk örneği tüm renklerin soluk şeridi: herhangi bir süre rengi soluk olabilir
+      "<div><span style='display:inline-block;width:14px;height:10px;margin-right:6px;background:linear-gradient(90deg," +
+      renkler.join(",") + ");opacity:{{ this.soluk_opaklik }}'></span>Soluk: {{ this.soluk_esik }} kişiden az nüfus<br>" +
+      "<span style='margin-left:20px;color:#6b6a66'>(seyrek yerleşim / boş alan)</span></div>" +
       "<div><span style='display:inline-block;width:14px;height:10px;margin-right:6px;background:{{ this.bagsiz }}'></span>Ağa bağlı değil</div>" +
       "<div><span style='display:inline-block;width:8px;height:8px;margin:0 8px 0 2px;border-radius:50%;" +
       "background:{{ this.tesis_dolgu }};border:1.5px solid {{ this.tesis_halka }}'></span>Tesis</div>" +
@@ -261,6 +288,7 @@ class KategoriKatmani(MacroElement):
         self.aralik_etiketleri = _js_json(ARALIK_ETIKETLERI)
         self.bagsiz, self.yuzey = BAGSIZ_RENK, YUZEY
         self.tesis_dolgu, self.tesis_halka, self.dis_opaklik = TESIS_DOLGU, TESIS_HALKA, DIS_TESIS_OPAKLIK
+        self.soluk_opaklik, self.soluk_esik = SOLUK_OPAKLIK, SOLUK_NUFUS_ESIGI
 
 
 def harita_olustur(altigenler: pd.DataFrame, tesisler: pd.DataFrame, sinirlar: gpd.GeoDataFrame,
@@ -312,6 +340,11 @@ def harita_olustur(altigenler: pd.DataFrame, tesisler: pd.DataFrame, sinirlar: g
 def main() -> None:
     """data/sonuclar/altigenler.parquet'ten data/sonuclar/harita.html üretir."""
     altigenler = pd.read_parquet(SONUC_DIZINI / "altigenler.parquet").set_index("h3")
+    nufus_dosyasi = SONUC_DIZINI / "altigen_nufus.parquet"
+    if nufus_dosyasi.exists():  # Faz 4 çıktısı: altıgen başına nüfus (ilçe parçaları toplanır)
+        altigenler["nufus"] = pd.read_parquet(nufus_dosyasi).groupby("h3")["nufus"].sum().reindex(altigenler.index)
+    else:
+        print("Uyarı: altigen_nufus.parquet yok, harita nüfussuz üretiliyor (önce: python -m src.nufus)")
     harita = harita_olustur(altigenler, tesis_tablosu(HEDEF_DIZINI), gpd.read_file(SINIR_DOSYASI))
     cikti = SONUC_DIZINI / "harita.html"
     harita.save(str(cikti))

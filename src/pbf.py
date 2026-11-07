@@ -54,8 +54,11 @@ def _beklenen_md5(url: str, istek: Callable = requests.get) -> str:
     return eslesme.group(1)
 
 
-def _akisla_indir(url: str, hedef: Path, istek: Callable = requests.get) -> None:
-    """URL'yi parça parça hedef dosyaya indirir, ilerlemeyi yazdırır."""
+def akisla_indir(url: str, hedef: Path, istek: Callable = requests.get) -> tuple[int, int]:
+    """URL'yi parça parça hedef dosyaya indirir, ilerlemeyi yazdırır.
+
+    (inen_bayt, beklenen_bayt) döndürür; sunucu boyut bildirmezse beklenen 0'dır.
+    """
     with istek(url, headers=ISTEMCI, stream=True, timeout=(30, 300)) as yanit:
         yanit.raise_for_status()
         toplam = int(yanit.headers.get("content-length", 0))
@@ -68,6 +71,7 @@ def _akisla_indir(url: str, hedef: Path, istek: Callable = requests.get) -> None
                 if yuzde >= son_yuzde + 10:
                     print(f"    {inen / 2**20:,.0f} / {toplam / 2**20:,.0f} MB (%{yuzde})", flush=True)
                     son_yuzde = yuzde
+    return inen, toplam
 
 
 def mevcut_pbf(dizin: Path = OSM_DIZINI) -> Path | None:
@@ -98,7 +102,7 @@ def pbf_indir(
     if gecici.exists() and md5_hesapla(gecici) == beklenen:
         print("    önceki indirme tam, tekrar indirilmiyor", flush=True)
     else:
-        tekrar_dene(_akisla_indir, url, gecici, istek=istek)
+        tekrar_dene(akisla_indir, url, gecici, istek=istek)
 
     gercek = md5_hesapla(gecici)
     if gercek != beklenen:
@@ -116,10 +120,9 @@ def veri_surumu_guncelle(pbf: Path, yol: Path = VERI_SURUMU_DOSYASI, url: str = 
     Dosya zaten bu PBF'i anlatıyorsa (aynı dosya adı) dokunulmaz. İndirme
     tarihi olarak PBF dosyasının diske yazıldığı an (UTC) kullanılır.
     """
-    if yol.exists():
-        mevcut = json.loads(yol.read_text(encoding="utf-8"))
-        if mevcut.get("dosya") == pbf.name:
-            return mevcut
+    mevcut = json.loads(yol.read_text(encoding="utf-8")) if yol.exists() else {}
+    if mevcut.get("dosya") == pbf.name:
+        return mevcut
     indirme = datetime.fromtimestamp(pbf.stat().st_mtime, tz=timezone.utc)
     bilgi = {
         "kaynak": url,
@@ -131,5 +134,14 @@ def veri_surumu_guncelle(pbf: Path, yol: Path = VERI_SURUMU_DOSYASI, url: str = 
         "ilce_sinirlari": "Aynı PBF: boundary=administrative, admin_level=6 ilişkileri",
         "lisans": "© OpenStreetMap katkıcıları, ODbL 1.0",
     }
+    # OSM dışındaki bölümler (nüfus vb.) korunur
+    bilgi = {**{k: v for k, v in mevcut.items() if isinstance(v, dict)}, **bilgi}
     yol.write_text(json.dumps(bilgi, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return bilgi
+
+
+def veri_surumu_bolumu_yaz(anahtar: str, bolum: dict, yol: Path = VERI_SURUMU_DOSYASI) -> None:
+    """veri_surumu.json'daki bir bölümü (ör. 'nufus') yazar; diğer içerik korunur."""
+    mevcut = json.loads(yol.read_text(encoding="utf-8")) if yol.exists() else {}
+    mevcut[anahtar] = bolum
+    yol.write_text(json.dumps(mevcut, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

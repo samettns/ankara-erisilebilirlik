@@ -24,6 +24,13 @@ KESIT_KUTUSU = (32.10, 39.50, 33.30, 40.32)
 # Türkiye geçişinde düğüm konumları için depo. sparse_file_array diskte tutar, RAM'i yormaz.
 KONUM_DEPOSU = "sparse_file_array," + str(OSM_DIZINI / "konumlar.tmp")
 
+# Nüfus: WorldPop Global2 R2025A v1, sınırlandırılmış (constrained), 100 m, 2025
+NUFUS_DIZINI = VERI_DIZINI / "nufus"
+NUFUS_YILI = 2025
+WORLDPOP_URL = ("https://data.worldpop.org/GIS/Population/Global_2015_2030/R2025A/2025/TUR/v1/100m/"
+                "constrained/tur_pop_2025_CN_100m_R2025A_v1.tif")
+SOLUK_NUFUS_ESIGI = 10  # bundan az nüfuslu altıgenler haritada soluk
+
 # Çalışma alanı
 ILCELER = ["Çankaya", "Keçiören", "Yenimahalle", "Mamak", "Etimesgut", "Sincan", "Altındağ"]
 GENISLETME_M = 2000  # sınırdakilerin komşu ilçedeki hedeflere ulaşabilmesi için

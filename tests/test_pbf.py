@@ -113,6 +113,15 @@ def test_veri_surumu_guncelle(tmp_path, monkeypatch):
     assert kayit["osm_veri_tarihi"] == "2026-11-04T21:21:03Z"
     assert kayit["md5"] == hashlib.md5(ICERIK).hexdigest() and kayit["dosya"] == dosya.name
 
+    # bölüm eklenir; yeni bir PBF için OSM kısmı yeniden yazılınca bölüm korunur
+    pbf.veri_surumu_bolumu_yaz("nufus", {"yil": 2025}, surum)
+    yeni = tmp_path / "turkey-2026-12-01.osm.pbf"
+    yeni.write_bytes(ICERIK)
+    pbf.veri_surumu_guncelle(yeni, surum, url="https://ornek")
+    kayit = json.loads(surum.read_text(encoding="utf-8"))
+    assert kayit["dosya"] == yeni.name and kayit["nufus"] == {"yil": 2025}
+
     # aynı dosya için tekrar yazılmaz
+    dosya = yeni
     surum.write_text(json.dumps({"dosya": dosya.name, "el_ile": True}), encoding="utf-8")
     assert pbf.veri_surumu_guncelle(dosya, surum)["el_ile"] is True

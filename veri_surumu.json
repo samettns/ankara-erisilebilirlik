@@ -6,5 +6,33 @@
   "osm_veri_tarihi": "2026-11-05T21:23:02Z",
   "indirme_tarihi": "2026-11-07T08:38:38Z",
   "ilce_sinirlari": "Aynı PBF: boundary=administrative, admin_level=6 ilişkileri",
-  "lisans": "© OpenStreetMap katkıcıları, ODbL 1.0"
+  "lisans": "© OpenStreetMap katkıcıları, ODbL 1.0",
+  "nufus": {
+    "urun": "WorldPop Global2 R2025A v1, sınırlandırılmış (constrained), 100 m (3 açı saniyesi)",
+    "yil": 2025,
+    "doi": "10.5258/SOTON/WP00839",
+    "lisans": "CC BY 4.0 (https://hub.worldpop.org/data/licence.txt)",
+    "alfa_notu": "WorldPop: 'The dataset currently represents an alpha version (R2025A) product and may change over the coming year as improvements are made.'",
+    "birim": "piksel başına kişi sayısı",
+    "url": "https://data.worldpop.org/GIS/Population/Global_2015_2030/R2025A/2025/TUR/v1/100m/constrained/tur_pop_2025_CN_100m_R2025A_v1.tif",
+    "dosya": "tur_pop_2025_CN_100m_R2025A_v1.tif",
+    "boyut_mb": 73.8,
+    "sha256": "dabb36ce32d839962aa521181f6c62be0c8a5114d2cbb3dd6efbf0bcfb2acdf8"
+  },
+  "nufus_dogrulama": {
+    "veri": "TÜİK Adrese Dayalı Nüfus Kayıt Sistemi (ADNKS) 2025 sonuçları, ilçe nüfusları",
+    "birincil_kaynak": "https://biruni.tuik.gov.tr/medas/?kn=95&locale=tr",
+    "yayin": "ADNKS 2025 sonuçları Şubat 2026'da yayımlandı",
+    "rakamlarin_alindigi_yer": "Ankara Ticaret Odası, 'Rakamlarla Ankara' (Ağustos 2026), s. 9, Tablo 5; kaynak olarak TÜİK ADNKS gösteriliyor (Erişim: 12 Şubat 2026)",
+    "rakamlarin_alindigi_url": "https://atonet.org.tr/Uploads/Birimler/Internet/Flash%20Tan%C4%B1t%C4%B1m%20Alan%C4%B1/2026-08-04-RakamlarlaAnkara/2026-08-03-Rakamlarla-Ankara.pdf",
+    "ilce_nufuslari": {
+      "Çankaya": 952198,
+      "Keçiören": 931722,
+      "Yenimahalle": 721531,
+      "Mamak": 690329,
+      "Etimesgut": 632458,
+      "Sincan": 605366,
+      "Altındağ": 418072
+    }
+  }
 }
