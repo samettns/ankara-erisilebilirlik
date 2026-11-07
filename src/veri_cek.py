@@ -1,32 +1,40 @@
-"""OSM'den yürüme ağı ve hedef noktaları (eczane vb.) indirip data/ altına kaydeder.
+"""Merkez ilçelerin yürüme ağını ve hedeflerini yerel OSM PBF dosyasından üretir.
 
-İndirilen her dosya diske yazılır; dosya zaten varsa tekrar indirilmez.
+İnternete sadece Geofabrik Türkiye PBF'i bir kez indirilirken çıkılır.
+Sonrası tamamen yereldir:
+
+1. PBF indir/doğrula, veri_surumu.json'u yaz
+2. Türkiye'den Ankara kesitini çıkar (tek seferlik, birkaç dakika)
+3. İlçe sınırlarını kesitteki idari sınır ilişkilerinden kur
+4. İlçe başına 2 km genişletilmiş alanın yürüme ağını kur, birleştir
+5. Hedefleri ve raylı hat ilişkilerini oku, hedef katmanlarını yaz
+
+Her ara çıktı diske yazılır; kesitten yeni olan çıktı tekrar üretilmez.
+Bir ilçe hata verirse diğerlerine geçilir, eksikler sonda raporlanır.
+
 Çalıştırma (proje kökünden):
     python -m src.veri_cek
 """
 
-import re
-from difflib import SequenceMatcher
+import json
+import time
 from pathlib import Path
 
 import geopandas as gpd
-import networkx as nx
 import osmnx as ox
 
 try:
-    from src.ayarlar import (AG_TIPI, ISIM_BENZERLIK_ESIGI, TEKRAR_ESIK_M,
-                             VERI_DIZINI, osmnx_ayarla)
-except ModuleNotFoundError:  # doğrudan `python src/veri_cek.py` ile çalıştırılırsa
-    from ayarlar import (AG_TIPI, ISIM_BENZERLIK_ESIGI, TEKRAR_ESIK_M,
-                         VERI_DIZINI, osmnx_ayarla)
-
-ECZANE_ETIKETLERI = {"amenity": "pharmacy"}
-TUTULACAK_SUTUNLAR = ["element", "id", "name", "geometry"]
-
-
-def yer_sorgusu(ilce: str) -> str:
-    """İlçe adından Nominatim'e gönderilecek yer sorgusunu üretir."""
-    return f"{ilce}, Ankara, Türkiye"
+    from src import ag, hedefler, osm_yerel
+    from src.ayarlar import (AG_DIZINI, BIRLESIK_AG_DOSYASI, GECICI_DIZIN, GENISLETME_M, HAM_DIZINI,
+                             HEDEF_DIZINI, ILCELER, KESIT_KUTUSU, OSM_DIZINI, SINIR_DOSYASI)
+    from src.pbf import pbf_indir, veri_surumu_guncelle
+except ModuleNotFoundError:
+    import ag
+    import hedefler
+    import osm_yerel
+    from ayarlar import (AG_DIZINI, BIRLESIK_AG_DOSYASI, GECICI_DIZIN, GENISLETME_M, HAM_DIZINI,
+                         HEDEF_DIZINI, ILCELER, KESIT_KUTUSU, OSM_DIZINI, SINIR_DOSYASI)
+    from pbf import pbf_indir, veri_surumu_guncelle
 
 
 def dosya_adi(ilce: str) -> str:
@@ -35,126 +43,190 @@ def dosya_adi(ilce: str) -> str:
     return ilce.translate(tablo).lower().replace(" ", "_")
 
 
-def yuruyus_agi_indir(ilce: str, veri_dizini: Path = VERI_DIZINI) -> nx.MultiDiGraph:
-    """İlçenin yürüme ağını döndürür.
+def guncel_mi(cikti: Path, girdiler: list[Path]) -> bool:
+    """Çıktı dosyası var ve tüm girdilerden daha yeniyse True döner."""
+    if not cikti.exists():
+        return False
+    return all(cikti.stat().st_mtime >= g.stat().st_mtime for g in girdiler)
 
-    data/<ilce>_walk.graphml varsa oradan okur, yoksa OSM'den indirip
-    bu dosyaya kaydeder.
+
+def kutuda_mi(geometri, kutu: tuple[float, float, float, float]) -> bool:
+    """Geometrinin sınır kutusu (batı, güney, doğu, kuzey) kutunun tamamen içindeyse True."""
+    bati, guney, dogu, kuzey = geometri.bounds
+    return bati >= kutu[0] and guney >= kutu[1] and dogu <= kutu[2] and kuzey <= kutu[3]
+
+
+def sinirlari_hazirla(kesit: Path, yol: Path = SINIR_DOSYASI) -> gpd.GeoDataFrame:
+    """İlçe sınırlarını dosyadan okur; kesitten eski veya ilçe listesi farklıysa yeniden kurar."""
+    if guncel_mi(yol, [kesit]):
+        sinirlar = gpd.read_file(yol)
+        if list(sinirlar["ilce"]) == ILCELER:
+            return sinirlar
+    sinirlar = osm_yerel.ilce_sinirlarini_oku(kesit)
+    yol.parent.mkdir(parents=True, exist_ok=True)
+    yol.unlink(missing_ok=True)
+    sinirlar.to_file(yol, driver="GPKG")
+    return sinirlar
+
+
+def ilce_aglarini_kur(kesit: Path, genis: dict, ag_dosyalari: dict, gecici_dizin: Path = GECICI_DIZIN) -> list[str]:
+    """Güncel olmayan ilçe ağlarını kurar; hata veren ilçelerin adlarını döndürür.
+
+    Yürüme yolları kesitten bir kez toplanır; her ilçe için genişletilmiş
+    poligona değen yollar geçici bir .osm XML'e yazılır, OSMnx ile graf
+    kurulur ve XML her durumda silinir.
     """
-    yol = veri_dizini / f"{dosya_adi(ilce)}_walk.graphml"
-    if yol.exists():
-        return ox.load_graphml(yol)
+    yapilacak = [i for i in genis if not guncel_mi(ag_dosyalari[i], [kesit])]
+    for ilce in genis:
+        if ilce not in yapilacak:
+            print(f"  [hazır] {ilce}", flush=True)
+    if not yapilacak:
+        return []
 
-    G = ox.graph_from_place(yer_sorgusu(ilce), network_type=AG_TIPI)
-    veri_dizini.mkdir(parents=True, exist_ok=True)
-    ox.save_graphml(G, yol)
-    return G
+    baslangic = time.time()
+    yollar = osm_yerel.yuruyus_yollarini_topla(kesit)
+    print(f"  kesitte {len(yollar):,} yürünebilir yol ({time.time() - baslangic:.0f} sn)", flush=True)
+
+    eksikler = []
+    for ilce in yapilacak:
+        xml = gecici_dizin / f"{dosya_adi(ilce)}_walk.osm"
+        baslangic = time.time()
+        try:
+            siralar = osm_yerel.poligona_degen_yollar(yollar, genis[ilce])
+            osm_yerel.osm_xml_yaz(yollar, siralar, xml)
+            G = ag.ilce_agi_kur(xml, ag_dosyalari[ilce])
+            print(f"  [tamam] {ilce}: {len(siralar):,} yol -> {G.number_of_nodes():,} düğüm, "
+                  f"{G.number_of_edges():,} kenar ({time.time() - baslangic:.0f} sn)", flush=True)
+            del G
+        except Exception as hata:
+            print(f"  [HATA] {ilce}: {type(hata).__name__}: {str(hata)[:200]}", flush=True)
+            eksikler.append(ilce)
+        finally:
+            xml.unlink(missing_ok=True)
+    if gecici_dizin.exists() and not any(gecici_dizin.iterdir()):
+        gecici_dizin.rmdir()
+    return eksikler
 
 
-def noktalara_cevir(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """OSM özelliklerini tek tip nokta katmanına çevirir.
+def birlesik_agi_uret(ag_dosyalari: list[Path], yol: Path = BIRLESIK_AG_DOSYASI) -> None:
+    """İlçe graflarını teker teker okuyup sadeleştirir, birleştirir ve kaydeder.
 
-    Poligon olarak çizilmiş eczaneler (bina vb.) metrik projeksiyonda
-    centroid'e indirgenir. Sadece element, id, name ve geometry sütunları
-    tutulur; çıktı EPSG:4326'dır.
+    Çıktı girdilerden yeniyse hiçbir şey yapmaz. Bellek için her ilçenin
+    tam grafı sadeleştirildikten hemen sonra bırakılır.
     """
-    gdf = gdf.reset_index()
-    for sutun in TUTULACAK_SUTUNLAR:
-        if sutun not in gdf.columns:
-            gdf[sutun] = None
-    gdf = gdf[TUTULACAK_SUTUNLAR].copy()
-
-    if gdf.empty:
-        return gpd.GeoDataFrame(gdf, geometry="geometry", crs="EPSG:4326")
-
-    metrik = gdf.to_crs(gdf.estimate_utm_crs())
-    nokta_degil = ~metrik.geometry.geom_type.eq("Point")
-    metrik.loc[nokta_degil, "geometry"] = metrik.loc[nokta_degil].geometry.centroid
-    return metrik.to_crs("EPSG:4326")
+    if guncel_mi(yol, ag_dosyalari):
+        print("  [hazır] birleşik ağ", flush=True)
+        return
+    sadeler = [ag.sadelestir(ox.load_graphml(d)) for d in ag_dosyalari]
+    B = ag.birlestir(sadeler)
+    del sadeler
+    ag.sade_graf_kaydet(B, yol)
+    print(f"  birleşik ağ: {B.number_of_nodes():,} düğüm, {B.number_of_edges():,} kenar", flush=True)
 
 
-def isim_normallestir(isim) -> str:
-    """İsmi karşılaştırma için sadeleştirir.
-
-    Türkçe kurallara göre küçük harfe çevirir, "eczane"/"eczanesi"
-    kelimelerini ve noktalamayı atar. Boş/eksik isim için "" döner.
-    Örn. "Eczane Temel" ve "TEMEL ECZANESİ" ikisi de "temel" olur.
-    """
-    if not isinstance(isim, str):
-        return ""
-    isim = isim.replace("İ", "i").replace("I", "ı").lower()
-    isim = re.sub(r"\beczan(e|esi)\b", " ", isim)
-    return " ".join(re.findall(r"\w+", isim))
-
-
-def isim_benzerligi(a, b) -> float:
-    """İki ismin normalleştirilmiş hallerinin 0-1 arası benzerliğini verir.
-
-    İsimlerden biri boşsa 0 döner: isimsiz kayıtlar hiçbir şeye benzemez.
-    """
-    na, nb = isim_normallestir(a), isim_normallestir(b)
-    if not na or not nb:
-        return 0.0
-    return SequenceMatcher(None, na, nb).ratio()
+def ham_verileri_hazirla(kesit: Path, alan, dizin: Path = HAM_DIZINI) -> tuple[gpd.GeoDataFrame, dict]:
+    """Ham hedef özelliklerini ve raylı hat ilişkilerini kesitten okur ya da diskten alır."""
+    ham_yolu, hat_yolu = dizin / "ozellikler.parquet", dizin / "hatlar.json"
+    dizin.mkdir(parents=True, exist_ok=True)
+    if guncel_mi(ham_yolu, [kesit]):
+        ham = gpd.read_parquet(ham_yolu)
+    else:
+        ham = osm_yerel.hedef_ozelliklerini_oku(kesit, alan)
+        ham.to_parquet(ham_yolu)
+    if guncel_mi(hat_yolu, [kesit]):
+        hatlar = json.loads(hat_yolu.read_text(encoding="utf-8"))
+    else:
+        hatlar = osm_yerel.hat_iliskilerini_oku(kesit)
+        hat_yolu.write_text(json.dumps(hatlar, ensure_ascii=False), encoding="utf-8")
+    return ham, hatlar
 
 
-def tekrarlari_temizle(
-    gdf: gpd.GeoDataFrame,
-    esik_m: float = TEKRAR_ESIK_M,
-    benzerlik_esigi: float = ISIM_BENZERLIK_ESIGI,
-) -> gpd.GeoDataFrame:
-    """Aynı yerin OSM'deki tekrar kayıtlarını tek kayda indirir.
-
-    Birbirine esik_m metreden yakın ve isim benzerliği benzerlik_esigi'nden
-    yüksek kayıtlar aynı yer sayılır. Zincirleme eşleşmeler (A~B, B~C) tek
-    grupta birleşir. Her gruptan önce 'node' (nokta) kaydı, sonra ilk kayıt
-    tutulur. Girdi coğrafi CRS'te (EPSG:4326) olmalıdır.
-    """
-    gdf = gdf.reset_index(drop=True)
-    if len(gdf) < 2:
-        return gdf.copy()
-
-    metrik = gdf.to_crs(gdf.estimate_utm_crs())
-    sol, sag = metrik.sindex.query(metrik.geometry, predicate="dwithin", distance=esik_m)
-
-    baglar = nx.Graph()
-    baglar.add_nodes_from(range(len(gdf)))
-    for i, j in zip(sol, sag):
-        if i < j and isim_benzerligi(gdf.at[i, "name"], gdf.at[j, "name"]) >= benzerlik_esigi:
-            baglar.add_edge(i, j)
-
-    tutulacak = [
-        min(grup, key=lambda k: (gdf.at[k, "element"] != "node", k))
-        for grup in nx.connected_components(baglar)
-    ]
-    return gdf.loc[sorted(tutulacak)].reset_index(drop=True)
+def _katman_yaz(yol: Path, katmanlar: dict[str, gpd.GeoDataFrame]) -> None:
+    """GeoPackage dosyasını silip verilen katmanlarla yeniden yazar."""
+    yol.parent.mkdir(parents=True, exist_ok=True)
+    yol.unlink(missing_ok=True)
+    for ad, gdf in katmanlar.items():
+        gdf.to_file(yol, layer=ad, driver="GPKG")
 
 
-def eczaneleri_indir(ilce: str, veri_dizini: Path = VERI_DIZINI) -> gpd.GeoDataFrame:
-    """İlçedeki eczaneleri nokta katmanı olarak döndürür.
+def hedefleri_uret(ham: gpd.GeoDataFrame, hat_json: dict, sinirlar: gpd.GeoDataFrame,
+                   dizin: Path = HEDEF_DIZINI) -> dict[str, int]:
+    """Ham özelliklerden dört hedef katmanını yazar; özet sayıları döndürür."""
+    eczaneler = hedefler.ilce_ekle(hedefler.eczaneleri_ayikla(ham), sinirlar)
+    hastaneler, hastane_kaynak = hedefler.hastaneleri_ayikla(ham)
+    hastaneler = hedefler.ilce_ekle(hastaneler, sinirlar)
+    birinci = hedefler.ilce_ekle(hedefler.birinci_basamak_ayikla(ham), sinirlar)
+    istasyonlar, rayli_kaynak = hedefler.rayli_ayikla(ham, hat_json)
+    istasyonlar = hedefler.ilce_ekle(istasyonlar, sinirlar)
 
-    data/<ilce>_eczaneler.gpkg varsa oradan okur, yoksa OSM'den indirip
-    noktaya çevirir, tekrar kayıtları temizler ve bu dosyaya kaydeder.
-    """
-    yol = veri_dizini / f"{dosya_adi(ilce)}_eczaneler.gpkg"
-    if yol.exists():
-        return gpd.read_file(yol)
+    _katman_yaz(dizin / "eczaneler.gpkg", {"tesisler": eczaneler})
+    _katman_yaz(dizin / "hastaneler.gpkg", {"tesisler": hastaneler, "kaynaklar": hastane_kaynak})
+    _katman_yaz(dizin / "birinci_basamak.gpkg", {"tesisler": birinci})
+    _katman_yaz(dizin / "rayli.gpkg", {"istasyonlar": istasyonlar, "kaynaklar": rayli_kaynak})
+    ic = lambda gdf: int(gdf["ilce"].notna().sum())  # noqa: E731  7 ilçe içindekiler
+    return {
+        "eczane (7 ilçe içi / toplam)": f"{ic(eczaneler)} / {len(eczaneler)}",
+        "hastane (7 ilçe içi / toplam)": f"{ic(hastaneler)} / {len(hastaneler)}",
+        "  kamu (operator:type=public/government)": int(hastaneler["operator:type"].isin(["public", "government"]).sum()),
+        "  operator:type boş": int(hastaneler["operator:type"].isna().sum()),
+        "hastane kaynak noktası": len(hastane_kaynak),
+        "birinci basamak (7 ilçe içi / toplam)": f"{ic(birinci)} / {len(birinci)}",
+        "  isminden ASM/sağlık ocağı": int(birinci["asm"].sum()),
+        "metro istasyonu": int(istasyonlar["metro"].sum()),
+        "Ankaray istasyonu": int(istasyonlar["ankaray"].sum()),
+        "Başkentray istasyonu": int(istasyonlar["baskentray"].sum()),
+        "raylı kaynak noktası (giriş + girişsiz istasyon)": len(rayli_kaynak),
+    }
 
-    ham = ox.features_from_place(yer_sorgusu(ilce), tags=ECZANE_ETIKETLERI)
-    eczaneler = tekrarlari_temizle(noktalara_cevir(ham))
-    veri_dizini.mkdir(parents=True, exist_ok=True)
-    eczaneler.to_file(yol, driver="GPKG")
-    return eczaneler
+
+def main() -> None:
+    """Tüm akışı çalıştırır ve eksik kalanları raporlar."""
+    toplam = time.time()
+    print("1/5 Türkiye PBF", flush=True)
+    pbf = pbf_indir()
+    surum = veri_surumu_guncelle(pbf)
+    print(f"  {pbf.name}, OSM veri tarihi {surum['osm_veri_tarihi']}", flush=True)
+
+    print("2/5 Ankara kesiti", flush=True)
+    kesit = OSM_DIZINI / pbf.name.replace("turkey-", "ankara-")
+    baslangic = time.time()
+    kesit_vardi = kesit.exists()
+    osm_yerel.ankara_kesiti_cikar(pbf, kesit)
+    print(f"  {'[hazır]' if kesit_vardi else f'çıkarıldı ({time.time() - baslangic:.0f} sn)'} "
+          f"{kesit.name}, {kesit.stat().st_size / 2**20:.1f} MB", flush=True)
+
+    print("3/5 İlçe sınırları", flush=True)
+    sinirlar = sinirlari_hazirla(kesit)
+    genis = {i: ag.genislet(g, GENISLETME_M) for i, g in zip(sinirlar["ilce"], sinirlar.geometry)}
+    alan = gpd.GeoSeries(list(genis.values()), crs="EPSG:4326").union_all()
+    if not kutuda_mi(alan, KESIT_KUTUSU):
+        raise ValueError(f"Genişletilmiş alan {alan.bounds} kesit kutusundan taşıyor; KESIT_KUTUSU'nu büyütün.")
+    km2 = sinirlar.to_crs(sinirlar.estimate_utm_crs()).area / 1e6
+    for ilce, a in zip(sinirlar["ilce"], km2):
+        print(f"  {ilce}: {a:,.0f} km²", flush=True)
+
+    print("4/5 Yürüme ağları", flush=True)
+    ag_dosyalari = {i: AG_DIZINI / f"{dosya_adi(i)}_walk.graphml" for i in ILCELER}
+    eksik_ag = ilce_aglarini_kur(kesit, genis, ag_dosyalari)
+    if eksik_ag:
+        print(f"  birleşik ağ üretilmedi, eksik: {', '.join(eksik_ag)}", flush=True)
+    else:
+        birlesik_agi_uret(list(ag_dosyalari.values()))
+
+    print("5/5 Hedefler", flush=True)
+    eksik_hedef = False
+    try:
+        ham, hatlar = ham_verileri_hazirla(kesit, alan)
+        for ad, sayi in hedefleri_uret(ham, hatlar, sinirlar).items():
+            print(f"  {ad}: {sayi}", flush=True)
+    except Exception as hata:
+        print(f"  [HATA] hedefler: {type(hata).__name__}: {str(hata)[:200]}", flush=True)
+        eksik_hedef = True
+
+    eksikler = [f"{i} ağı" for i in eksik_ag] + (["hedefler"] if eksik_hedef else [])
+    print(f"\nSONUÇ ({(time.time() - toplam) / 60:.1f} dk):",
+          "hepsi tamam" if not eksikler else f"eksik kalanlar -> {', '.join(eksikler)}", flush=True)
 
 
 if __name__ == "__main__":
-    osmnx_ayarla()
-    ILCE = "Çankaya"
-
-    G = yuruyus_agi_indir(ILCE)
-    print(f"{ILCE} yürüme ağı: {G.number_of_nodes():,} düğüm, {G.number_of_edges():,} kenar")
-
-    eczaneler = eczaneleri_indir(ILCE)
-    print(f"{ILCE} eczane sayısı: {len(eczaneler)}")
-    print(f"  isimsiz: {eczaneler['name'].isna().sum()}")
-    print(f"Dosyalar: {VERI_DIZINI}")
+    main()

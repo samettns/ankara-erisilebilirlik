@@ -1,0 +1,10 @@
+{
+  "kaynak": "https://download.geofabrik.de/europe/turkey-latest.osm.pbf",
+  "dosya": "turkey-2026-11-05.osm.pbf",
+  "md5": "9104c9597841ac867b26f13a345cf3c5",
+  "boyut_mb": 622.7,
+  "osm_veri_tarihi": "2026-11-05T21:23:02Z",
+  "indirme_tarihi": "2026-11-07T08:38:38Z",
+  "ilce_sinirlari": "Aynı PBF: boundary=administrative, admin_level=6 ilişkileri",
+  "lisans": "© OpenStreetMap katkıcıları, ODbL 1.0"
+}
