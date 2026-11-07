@@ -36,6 +36,9 @@ except ModuleNotFoundError:
     from veri_cek import guncel_mi
 
 SANAL_KAYNAK = -1  # OSM düğüm kimlikleri pozitif; çakışmaz
+# Hesap yöntemi değişince artırılır; sonuçlar girdiler değişmese de yeniden hesaplanır.
+# 2: iki aşamalı (son kilometre) hesap; 3: 2. aşamada paralel özel bağlantılar ve kamu cepleri
+YONTEM_SURUMU = 3
 KATEGORILER = ["eczane", "hastane", "birinci_basamak", "rayli", "baskentray"]
 
 
@@ -196,6 +199,40 @@ def _super_kaynakli_dijkstra(G: nx.Graph, baslangic: dict, gorunum=None) -> tupl
     return onculler, mesafeler
 
 
+def ikinci_asama_grafi(H: nx.Graph, ulasilan: dict) -> nx.DiGraph:
+    """2. aşamada (site içi) gezilecek yönlü graf.
+
+    - Özel bağlantılar (ozel kenar veya kamu kenarına paralel ozel_length) iki yönlü.
+    - 1. aşamada ulaşılamamış iki düğüm arasındaki kamu kenarı iki yönlü: sadece
+      site içinden girilebilen kamu "cepleri" (ör. site içindeki etiketsiz yaya yolu).
+    - Ulaşılmış düğümden ulaşılmamış düğüme kamu kenarı tek yönlü (kapıdan içeri).
+    - Ulaşılmış iki düğüm arasındaki kamu kenarı yok: kamu ağının süresi zaten kesin,
+      2. aşama oradan geçip kestirme üretemez.
+    Aynı yönde birden fazla bağlantı olursa en kısası kalır.
+    """
+    O = nx.DiGraph()
+
+    def ekle(a, b, uzunluk):
+        if not O.has_edge(a, b) or uzunluk < O[a][b]["length"]:
+            O.add_edge(a, b, length=uzunluk)
+
+    for u, v, d in H.edges(data=True):
+        oz = ag.ozel_uzunluk(d)
+        if oz is not None:
+            ekle(u, v, oz)
+            ekle(v, u, oz)
+        if not d.get("ozel", False):
+            u_var, v_var = u in ulasilan, v in ulasilan
+            if not u_var and not v_var:
+                ekle(u, v, d["length"])
+                ekle(v, u, d["length"])
+            elif u_var and not v_var:
+                ekle(u, v, d["length"])
+            elif v_var and not u_var:
+                ekle(v, u, d["length"])
+    return O
+
+
 def en_yakin_sureler(
     H: nx.Graph,
     baglantilar: pd.DataFrame,
@@ -205,10 +242,11 @@ def en_yakin_sureler(
 
     1. Sadece kamuya açık kenarlarda (ozel=False), sanal süper kaynaktan
        Dijkstra. Kaynak kenarlarının ağırlığı bağlantı mesafesidir.
-    2. Sadece özel kenarlarda (konut sitesi içi yollar), 1. aşamada süresi
-       bulunan "kapı" düğümlerinden o sürelerle başlayan ikinci Dijkstra.
-       Yalnızca 1. aşamada ulaşılamayan düğümler bu aşamadan süre alır; bu
-       yüzden kamu düğümlerinin süresi değişmez, özel yol kestirme olamaz.
+    2. ikinci_asama_grafi üzerinde (özel bağlantılar ve sadece site içinden
+       girilebilen kamu cepleri), 1. aşamada süresi bulunan "kapı"
+       düğümlerinden o sürelerle başlayan ikinci Dijkstra. Yalnızca 1. aşamada
+       ulaşılamayan düğümler bu aşamadan süre alır; kamu düğümlerinin süresi
+       değişmez, özel yol kestirme olamaz.
 
     Sadece baglandi=True noktalar kullanılır; aynı düğüme bağlanan noktalardan
     en kısa bağlantılı olan kalır. Ulaşılamayan düğümler sonuçta yer almaz.
@@ -227,10 +265,8 @@ def en_yakin_sureler(
     koken = _kokenleri_bul(onculler, dict(zip(bagli["dugum"].astype(int), bagli["tesis"])))
     ozel_yol = dict.fromkeys(mesafeler, False)
 
-    # 2. aşama: sadece özel kenarlar, kapılardan içeri
-    O = nx.Graph()
-    O.add_edges_from((u, v, d) for u, v, d in H.edges(data=True) if d.get("ozel", False))
-    kapilar = {n: mesafeler[n] for n in O if n in mesafeler}
+    O = ikinci_asama_grafi(H, mesafeler)
+    kapilar = {n: mesafeler[n] for n in O if n in mesafeler and O.out_degree(n) > 0}
     if kapilar:
         onculler2, mesafeler2 = _super_kaynakli_dijkstra(O, kapilar)
         koken2 = _kokenleri_bul(onculler2, {k: koken[k] for k in kapilar})
@@ -305,10 +341,11 @@ def main() -> None:
     """Tüm kategoriler için süreleri hesaplar, kaydeder ve özetleri basar."""
     sonuc_yolu = SONUC_DIZINI / "dugum_sureleri.parquet"
     girdiler = [BIRLESIK_AG_DOSYASI, SINIR_DOSYASI, *sorted(HEDEF_DIZINI.glob("*.gpkg"))]
-    if guncel_mi(sonuc_yolu, girdiler):
-        print(f"[hazır] {sonuc_yolu} girdilerden yeni; yeniden hesaplamak için dosyayı silin.")
-        print(json.dumps(json.loads((SONUC_DIZINI / "rapor.json").read_text(encoding="utf-8"))["ozet"],
-                         ensure_ascii=False, indent=2))
+    rapor_yolu = SONUC_DIZINI / "rapor.json"
+    eski_rapor = json.loads(rapor_yolu.read_text(encoding="utf-8")) if rapor_yolu.exists() else {}
+    if guncel_mi(sonuc_yolu, girdiler) and eski_rapor.get("yontem_surumu") == YONTEM_SURUMU:
+        print(f"[hazır] {sonuc_yolu} girdilerden yeni ve aynı yöntem sürümüyle hesaplanmış.")
+        print(json.dumps(eski_rapor["ozet"], ensure_ascii=False, indent=2))
         return
 
     baslangic = time.time()
@@ -333,7 +370,7 @@ def main() -> None:
     sonuc = dugumler.loc[dugumler.index.isin(list(ana_parca)), ["x", "y", "ilce"]].copy()
     ilce_ici = sonuc["ilce"].notna()
     kaynaklar = kategori_kaynaklari()
-    tum_baglantilar, rapor = [], {"graf": parca_ozeti, "tesisler": {}, "ozet": {}}
+    tum_baglantilar, rapor = [], {"yontem_surumu": YONTEM_SURUMU, "graf": parca_ozeti, "tesisler": {}, "ozet": {}}
 
     for kategori in KATEGORILER:
         t0 = time.time()

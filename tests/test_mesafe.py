@@ -213,6 +213,40 @@ def test_iki_asama_yakin_kapi_secilir_ve_tesis_kokeni_dogru():
     assert s.loc[3, "tesis"] == "dogu" and s.loc[3, "sure_dk"] == pytest.approx(10 / 80)  # kapı süresi değişmez
 
 
+def test_kamu_kenarina_paralel_ozel_baglanti_site_icinde_kullanilir():
+    # 1-2 arası: kamu 45 m, paralel özel 40 m (ozel_length). 3 sadece özel yolla 2'ye bağlı (10 m).
+    G = nx.Graph()
+    G.add_edge(1, 2, length=45.0, ozel=False, ozel_length=40.0)
+    G.add_edge(2, 3, length=10.0, ozel=True)
+    s = mesafe.en_yakin_sureler(G, _bag("t", 1), hiz_m_dk=80)
+    assert s.loc[2, "sure_dk"] == pytest.approx(45 / 80)  # kamu düğümü: kestirme yok
+    assert s.loc[3, "sure_dk"] == pytest.approx(50 / 80)  # site içi: 40 + 10 (55 değil)
+
+
+def test_site_icinden_girilen_kamu_cebi_sure_alir():
+    # 1-2 kamu (80 m); 2-20 özel site yolu (30 m); 20-21 kamu ama sadece site içinden ulaşılıyor (40 m)
+    G = nx.Graph()
+    G.add_edge(1, 2, length=80.0, ozel=False)
+    G.add_edge(2, 20, length=30.0, ozel=True)
+    G.add_edge(20, 21, length=40.0, ozel=False)
+    s = mesafe.en_yakin_sureler(G, _bag("t", 1), hiz_m_dk=80)
+    assert s.loc[21, "sure_dk"] == pytest.approx(150 / 80) and s.loc[21, "ozel_yol"]
+    assert s.loc[20, "sure_dk"] == pytest.approx(110 / 80)
+
+
+def test_ikinci_asama_grafi_ulasilan_kamu_kenarlarini_almaz():
+    G = nx.Graph()
+    G.add_edge(1, 2, length=80.0, ozel=False)  # ulaşılmış iki düğüm: alınmaz
+    G.add_edge(2, 3, length=50.0, ozel=False)  # ulaşılmış -> ulaşılmamış: tek yön
+    G.add_edge(3, 4, length=20.0, ozel=False)  # iki ulaşılmamış: iki yön
+    G.add_edge(1, 5, length=60.0, ozel=False, ozel_length=10.0)  # paralel özel: iki yön, 10 m
+    O = mesafe.ikinci_asama_grafi(G, {1: 0.0, 2: 1.0, 5: 0.5})
+    assert not O.has_edge(1, 2) and not O.has_edge(2, 1)
+    assert O.has_edge(2, 3) and not O.has_edge(3, 2)
+    assert O.has_edge(3, 4) and O.has_edge(4, 3)
+    assert O[1][5]["length"] == 10.0 and O[5][1]["length"] == 10.0
+
+
 def test_kamu_dugumleri():
     assert mesafe.kamu_dugumleri(_site_grafi()) == {1, 2, 3}
 

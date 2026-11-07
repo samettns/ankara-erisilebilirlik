@@ -6,7 +6,6 @@ from pathlib import Path
 PROJE_KOKU = Path(__file__).resolve().parent.parent
 VERI_DIZINI = PROJE_KOKU / "data"
 OSM_DIZINI = VERI_DIZINI / "osm"  # Türkiye PBF ve Ankara kesiti
-AG_DIZINI = VERI_DIZINI / "ag"  # ilçe başına ham OSMnx yürüme ağları
 HAM_DIZINI = VERI_DIZINI / "ham"  # kesitten okunmuş ham hedef özellikleri ve hatlar
 HEDEF_DIZINI = VERI_DIZINI / "hedefler"  # temizlenmiş hedef katmanları
 SONUC_DIZINI = VERI_DIZINI / "sonuclar"  # düğüm başına yürüme süreleri ve raporlar

@@ -225,7 +225,7 @@ def test_xml_yaz_ve_graf_kur(kesit, tmp_path):
     osm_yerel.osm_xml_yaz(yollar, siralar, xml)
     assert osm_yerel.XML_URETICI in xml.read_text(encoding="utf-8")
 
-    G = ag.ilce_agi_kur(xml, tmp_path / "cankaya.graphml")
+    G = ag.ag_kur(xml)
     assert set(G.nodes) == {11, 12, 14, 15}
     assert G.has_edge(14, 15) and G.has_edge(15, 14)
     assert G[14][15][0]["name"] == "Sınır Sokak"

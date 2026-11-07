@@ -1,4 +1,4 @@
-"""Yürüme ağı: ilçe başına graf kurma, sadeleştirme ve tek grafta birleştirme."""
+"""Yürüme ağı: OSM XML'den tek parça graf kurma ve analiz için sadeleştirme."""
 
 from pathlib import Path
 
@@ -19,20 +19,24 @@ def genislet(geometri: BaseGeometry, metre: float) -> BaseGeometry:
     return metrik.buffer(metre).to_crs("EPSG:4326").iloc[0]
 
 
-def ilce_agi_kur(xml_yolu: Path, cikti: Path) -> nx.MultiDiGraph:
-    """Yürüme yollarını içeren OSM XML'den OSMnx grafı kurar ve GraphML olarak kaydeder.
+# Ağ kurma yöntemi değişince artırılır; birleşik ağ yeniden kurulur.
+# 2: ağ ilçe ilçe değil tek parça kurulup bir kez sadeleştiriliyor
+# 3: kamu kenarına paralel özel bağlantı atılmıyor, ozel_length olarak saklanıyor
+AG_SURUMU = 3
+
+
+def ag_kur(xml_yolu: Path) -> nx.MultiDiGraph:
+    """Yürüme yollarını içeren OSM XML'den sadeleştirilmiş OSMnx grafı kurar.
 
     XML zaten walk filtresinden geçmiş yolları ve konut sitelerindeki özel
     yolları (access=private) içerir (osm_yerel). Yürüme ağı iki yönlü
     olduğundan bidirectional=True; tüm bileşenler (retain_all) tutulur.
     Sadeleştirme edge_attrs_differ=["access"] ile yapılır: kamu yolu ile özel
     yolun buluştuğu kapı düğümü korunur, iki tür tek kenarda birleşmez.
+    Sadeleştirme tüm ağ üzerinde bir kez yapılmalıdır (bkz. veri_cek.birlesik_agi_kur).
     """
     G = ox.graph_from_xml(xml_yolu, bidirectional=True, simplify=False, retain_all=True)
-    G = ox.simplify_graph(G, edge_attrs_differ=["access"])
-    cikti.parent.mkdir(parents=True, exist_ok=True)
-    ox.save_graphml(G, cikti)
-    return G
+    return ox.simplify_graph(G, edge_attrs_differ=["access"])
 
 
 def ozel_kenar_mi(veri: dict) -> bool:
@@ -44,21 +48,45 @@ def ozel_kenar_mi(veri: dict) -> bool:
 
 
 def _kenar_ekle(H: nx.Graph, u, v, uzunluk: float, ozel: bool) -> None:
-    """Kenarı ekler; varsa kamu kenarı özelden, aynı türde kısa olan uzundan öncelikli."""
-    if H.has_edge(u, v):
-        mevcut = H[u][v]
-        if (ozel, uzunluk) >= (mevcut["ozel"], mevcut["length"]):
-            return
-    H.add_edge(u, v, length=uzunluk, ozel=ozel)
+    """u-v kenarını ekler; aynı iki düğüm arasında kamu ve özel bağlantı ayrı tutulur.
+
+    - length/ozel: kamu bağlantısı varsa en kısa kamu uzunluğu ve ozel=False,
+      yoksa en kısa özel uzunluk ve ozel=True. 1. aşama (kamu) sadece
+      ozel=False kenarları length ile kullanır; özel yol kestirme olamaz.
+    - ozel_length: kamu kenarının yanında ayrıca paralel bir özel bağlantı
+      varsa onun en kısa uzunluğu. 2. aşama (site içi) bunu kullanır; aksi
+      halde kısa özel bağlantı kaybolur ve site içi süreler uzar.
+    """
+    if not H.has_edge(u, v):
+        H.add_edge(u, v, length=uzunluk, ozel=ozel)
+        return
+    m = H[u][v]
+    if ozel and m["ozel"]:
+        m["length"] = min(m["length"], uzunluk)
+    elif ozel:  # mevcut kamu kenarının yanına paralel özel bağlantı
+        m["ozel_length"] = min(m.get("ozel_length", uzunluk), uzunluk)
+    elif m["ozel"]:  # mevcut özel kenar, şimdi kamu bağlantısı da var
+        m["ozel_length"] = m["length"]
+        m["length"], m["ozel"] = uzunluk, False
+    else:
+        m["length"] = min(m["length"], uzunluk)
+
+
+def ozel_uzunluk(veri: dict) -> float | None:
+    """Kenarın 2. aşamada (site içi yollar) kullanılacak uzunluğu; özel bağlantı yoksa None."""
+    if veri.get("ozel", False):
+        return veri["length"]
+    return veri.get("ozel_length")
 
 
 def sadelestir(G: nx.MultiDiGraph) -> nx.Graph:
     """OSMnx grafını analiz için hafif, yönsüz bir grafa çevirir.
 
-    Düğümlerde sadece x, y; kenarlarda length (metre) ve ozel (konut sitesi
-    içi özel yol) tutulur. Aynı iki düğüm arasında kamu kenarı varsa o kalır
-    (iki ucu kamu ağında olan özel kenar sadece kestirme yaratır); aynı
-    türden paralel kenarlardan en kısası kalır. Kendine dönen kenarlar atılır.
+    Düğümlerde sadece x, y; kenarlarda length (metre), ozel (konut sitesi
+    içi özel yol) ve gerekirse ozel_length tutulur (bkz. _kenar_ekle): kamu
+    bağlantısı varsa length onundur, paralel özel bağlantı ozel_length'te
+    saklanır. Aynı türden paralel kenarlardan en kısası kalır. Kendine dönen
+    kenarlar atılır.
     Yürüme ağı iki yönlü olduğundan yönsüz graf sonuçları değiştirmez.
     """
     H = nx.Graph()
@@ -69,19 +97,25 @@ def sadelestir(G: nx.MultiDiGraph) -> nx.Graph:
     return H
 
 
-def birlestir(graflar: list[nx.Graph]) -> nx.Graph:
-    """Sadeleştirilmiş ilçe graflarını tek grafta birleştirir.
+def ham_graf_kur(yollar, siralar) -> nx.Graph:
+    """Seçilen yollardan sadeleştirilmemiş yalın graf kurar (doğrulama için).
 
-    OSM düğüm kimlikleri ortak olduğundan örtüşen bölgelerdeki düğümler
-    tekleşir ve ilçe sınırında ağ kesintisiz bağlanır. Aynı kenar birden
-    fazla grafta varsa sadelestir'deki öncelik geçerlidir (kamu, sonra kısa).
+    Her ardışık düğüm çifti bir kenardır; uzunluk OSMnx ile aynı büyük daire
+    formülüyle hesaplanır, ozel bayrağı yolun bayrağıdır. Sadeleştirilmiş
+    ağın mesafeleri, ortak düğümlerde bu grafınkiyle aynı olmalıdır.
+    yollar: osm_yerel.YuruyusYollari, siralar: seçilen yol sıra numaraları.
     """
-    B = nx.Graph()
-    for G in graflar:
-        B.add_nodes_from(G.nodes(data=True))
-        for u, v, d in G.edges(data=True):
-            _kenar_ekle(B, u, v, d["length"], bool(d.get("ozel", False)))
-    return B
+    H = nx.Graph()
+    for i in siralar:
+        bas, son = yollar.baslangic[i], yollar.baslangic[i + 1]
+        d, x, y = yollar.dugum_idleri[bas:son], yollar.lon[bas:son], yollar.lat[bas:son]
+        uzunluk = ox.distance.great_circle(y[:-1], x[:-1], y[1:], x[1:])
+        for j in range(len(d)):
+            H.add_node(int(d[j]), x=float(x[j]), y=float(y[j]))
+        for j in range(len(d) - 1):
+            if d[j] != d[j + 1]:
+                _kenar_ekle(H, int(d[j]), int(d[j + 1]), float(uzunluk[j]), bool(yollar.ozel[i]))
+    return H
 
 
 def sade_graf_kaydet(G: nx.Graph, yol: Path) -> None:

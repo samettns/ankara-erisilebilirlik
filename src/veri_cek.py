@@ -6,11 +6,11 @@ Sonrası tamamen yereldir:
 1. PBF indir/doğrula, veri_surumu.json'u yaz
 2. Türkiye'den Ankara kesitini çıkar (tek seferlik, birkaç dakika)
 3. İlçe sınırlarını kesitteki idari sınır ilişkilerinden kur
-4. İlçe başına 2 km genişletilmiş alanın yürüme ağını kur, birleştir
+4. 7 ilçenin 2 km genişletilmiş birleşik alanının yürüme ağını tek parça kur
 5. Hedefleri ve raylı hat ilişkilerini oku, hedef katmanlarını yaz
 
 Her ara çıktı diske yazılır; kesitten yeni olan çıktı tekrar üretilmez.
-Bir ilçe hata verirse diğerlerine geçilir, eksikler sonda raporlanır.
+Bir adım hata verirse sonrakine geçilir, eksikler sonda raporlanır.
 
 Çalıştırma (proje kökünden):
     python -m src.veri_cek
@@ -21,18 +21,17 @@ import time
 from pathlib import Path
 
 import geopandas as gpd
-import osmnx as ox
 
 try:
     from src import ag, hedefler, osm_yerel
-    from src.ayarlar import (AG_DIZINI, BIRLESIK_AG_DOSYASI, GECICI_DIZIN, GENISLETME_M, HAM_DIZINI,
+    from src.ayarlar import (BIRLESIK_AG_DOSYASI, GECICI_DIZIN, GENISLETME_M, HAM_DIZINI,
                              HEDEF_DIZINI, ILCELER, KESIT_KUTUSU, OSM_DIZINI, SINIR_DOSYASI)
     from src.pbf import pbf_indir, veri_surumu_guncelle
 except ModuleNotFoundError:
     import ag
     import hedefler
     import osm_yerel
-    from ayarlar import (AG_DIZINI, BIRLESIK_AG_DOSYASI, GECICI_DIZIN, GENISLETME_M, HAM_DIZINI,
+    from ayarlar import (BIRLESIK_AG_DOSYASI, GECICI_DIZIN, GENISLETME_M, HAM_DIZINI,
                          HEDEF_DIZINI, ILCELER, KESIT_KUTUSU, OSM_DIZINI, SINIR_DOSYASI)
     from pbf import pbf_indir, veri_surumu_guncelle
 
@@ -69,61 +68,60 @@ def sinirlari_hazirla(kesit: Path, yol: Path = SINIR_DOSYASI) -> gpd.GeoDataFram
     return sinirlar
 
 
-def ilce_aglarini_kur(kesit: Path, genis: dict, ag_dosyalari: dict, gecici_dizin: Path = GECICI_DIZIN) -> list[str]:
-    """Güncel olmayan ilçe ağlarını kurar; hata veren ilçelerin adlarını döndürür.
+def _ag_kimligi_yolu(cikti: Path) -> Path:
+    """Birleşik ağın yanındaki kimlik dosyası (ağ sürümü ve kaynak kesit)."""
+    return cikti.with_suffix(".json")
 
-    Yürüme yolları (konut sitelerindeki özel yollar dahil) kesitten bir kez
-    toplanır; her ilçe için genişletilmiş poligona değen yollar geçici bir
-    .osm XML'e yazılır, OSMnx ile graf kurulur ve XML her durumda silinir.
+
+def ag_guncel_mi(cikti: Path, kesit: Path) -> bool:
+    """Ağ dosyası kesitten yeni ve aynı kesitle, aynı ağ sürümüyle kurulmuşsa True."""
+    kimlik = _ag_kimligi_yolu(cikti)
+    if not guncel_mi(cikti, [kesit]) or not kimlik.exists():
+        return False
+    bilgi = json.loads(kimlik.read_text(encoding="utf-8"))
+    return bilgi.get("ag_surumu") == ag.AG_SURUMU and bilgi.get("kesit") == kesit.name
+
+
+def birlesik_agi_kur(kesit: Path, alan, cikti: Path = BIRLESIK_AG_DOSYASI,
+                     gecici_dizin: Path = GECICI_DIZIN) -> dict:
+    """Genişletilmiş birleşik alanın yürüme ağını tek parça kurar, bir kez sadeleştirir ve kaydeder.
+
+    Yürüme yolları (konut sitelerindeki özel yollar dahil) kesitten toplanır;
+    alana değen yollar tek bir geçici .osm XML'e yazılır, OSMnx ile kurulup
+    sadeleştirilir, yalın grafa çevrilir. XML her durumda silinir. Ağ ilçe
+    ilçe kurulup ayrı sadeleştirilmez: öyle yapıldığında bir ilçede ara düğüm
+    olarak silinen düğüm komşu ilçede çıkmaz uç kalıp birleşik grafta tek
+    yönden bağlanıyor, süresi uzun çıkıyordu. Güncelse hiçbir şey yapmaz.
+    Döner: özet sayılar.
     """
-    yapilacak = [i for i in genis if not guncel_mi(ag_dosyalari[i], [kesit])]
-    for ilce in genis:
-        if ilce not in yapilacak:
-            print(f"  [hazır] {ilce}", flush=True)
-    if not yapilacak:
-        return []
-
+    if ag_guncel_mi(cikti, kesit):
+        print("  [hazır] birleşik ağ", flush=True)
+        return {}
     baslangic = time.time()
     konut = osm_yerel.konut_alanlarini_oku(kesit)
     yollar = osm_yerel.yuruyus_yollarini_topla(kesit, konut_alani=konut)
-    print(f"  kesitte {len(yollar):,} yürünebilir yol; bunların {int(yollar.ozel.sum()):,} tanesi konut sitesi "
-          f"içi özel yol ({time.time() - baslangic:.0f} sn)", flush=True)
+    siralar = osm_yerel.poligona_degen_yollar(yollar, alan)
+    print(f"  kesitte {len(yollar):,} yürünebilir yol ({int(yollar.ozel.sum()):,} konut sitesi içi özel yol); "
+          f"alana değen {len(siralar):,} ({time.time() - baslangic:.0f} sn)", flush=True)
 
-    eksikler = []
-    for ilce in yapilacak:
-        xml = gecici_dizin / f"{dosya_adi(ilce)}_walk.osm"
-        baslangic = time.time()
-        try:
-            siralar = osm_yerel.poligona_degen_yollar(yollar, genis[ilce])
-            osm_yerel.osm_xml_yaz(yollar, siralar, xml)
-            G = ag.ilce_agi_kur(xml, ag_dosyalari[ilce])
-            print(f"  [tamam] {ilce}: {len(siralar):,} yol -> {G.number_of_nodes():,} düğüm, "
-                  f"{G.number_of_edges():,} kenar ({time.time() - baslangic:.0f} sn)", flush=True)
-            del G
-        except Exception as hata:
-            print(f"  [HATA] {ilce}: {type(hata).__name__}: {str(hata)[:200]}", flush=True)
-            eksikler.append(ilce)
-        finally:
-            xml.unlink(missing_ok=True)
-    if gecici_dizin.exists() and not any(gecici_dizin.iterdir()):
-        gecici_dizin.rmdir()
-    return eksikler
-
-
-def birlesik_agi_uret(ag_dosyalari: list[Path], yol: Path = BIRLESIK_AG_DOSYASI) -> None:
-    """İlçe graflarını teker teker okuyup sadeleştirir, birleştirir ve kaydeder.
-
-    Çıktı girdilerden yeniyse hiçbir şey yapmaz. Bellek için her ilçenin
-    tam grafı sadeleştirildikten hemen sonra bırakılır.
-    """
-    if guncel_mi(yol, ag_dosyalari):
-        print("  [hazır] birleşik ağ", flush=True)
-        return
-    sadeler = [ag.sadelestir(ox.load_graphml(d)) for d in ag_dosyalari]
-    B = ag.birlestir(sadeler)
-    del sadeler
-    ag.sade_graf_kaydet(B, yol)
-    print(f"  birleşik ağ: {B.number_of_nodes():,} düğüm, {B.number_of_edges():,} kenar", flush=True)
+    xml = gecici_dizin / "ankara_walk.osm"
+    try:
+        osm_yerel.osm_xml_yaz(yollar, siralar, xml)
+        del yollar
+        G = ag.ag_kur(xml)
+    finally:
+        xml.unlink(missing_ok=True)
+        if gecici_dizin.exists() and not any(gecici_dizin.iterdir()):
+            gecici_dizin.rmdir()
+    ozet = {"osmnx_dugum": G.number_of_nodes(), "osmnx_kenar": G.number_of_edges()}
+    H = ag.sadelestir(G)
+    del G
+    ag.sade_graf_kaydet(H, cikti)
+    _ag_kimligi_yolu(cikti).write_text(json.dumps({"ag_surumu": ag.AG_SURUMU, "kesit": kesit.name}), encoding="utf-8")
+    ozet.update(dugum=H.number_of_nodes(), kenar=H.number_of_edges())
+    print(f"  birleşik ağ: {H.number_of_nodes():,} düğüm, {H.number_of_edges():,} kenar "
+          f"({time.time() - baslangic:.0f} sn)", flush=True)
+    return ozet
 
 
 def ham_verileri_hazirla(kesit: Path, alan, dizin: Path = HAM_DIZINI) -> tuple[gpd.GeoDataFrame, dict]:
@@ -208,13 +206,13 @@ def main() -> None:
     for ilce, a in zip(sinirlar["ilce"], km2):
         print(f"  {ilce}: {a:,.0f} km²", flush=True)
 
-    print("4/5 Yürüme ağları", flush=True)
-    ag_dosyalari = {i: AG_DIZINI / f"{dosya_adi(i)}_walk.graphml" for i in ILCELER}
-    eksik_ag = ilce_aglarini_kur(kesit, genis, ag_dosyalari)
-    if eksik_ag:
-        print(f"  birleşik ağ üretilmedi, eksik: {', '.join(eksik_ag)}", flush=True)
-    else:
-        birlesik_agi_uret(list(ag_dosyalari.values()))
+    print("4/5 Yürüme ağı (tek parça)", flush=True)
+    eksik_ag = False
+    try:
+        birlesik_agi_kur(kesit, alan)
+    except Exception as hata:
+        print(f"  [HATA] yürüme ağı: {type(hata).__name__}: {str(hata)[:200]}", flush=True)
+        eksik_ag = True
 
     print("5/5 Hedefler", flush=True)
     eksik_hedef = False
@@ -226,7 +224,7 @@ def main() -> None:
         print(f"  [HATA] hedefler: {type(hata).__name__}: {str(hata)[:200]}", flush=True)
         eksik_hedef = True
 
-    eksikler = [f"{i} ağı" for i in eksik_ag] + (["hedefler"] if eksik_hedef else [])
+    eksikler = (["yürüme ağı"] if eksik_ag else []) + (["hedefler"] if eksik_hedef else [])
     print(f"\nSONUÇ ({(time.time() - toplam) / 60:.1f} dk):",
           "hepsi tamam" if not eksikler else f"eksik kalanlar -> {', '.join(eksikler)}", flush=True)
 

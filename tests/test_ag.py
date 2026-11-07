@@ -42,25 +42,6 @@ def test_sadelestir_yonsuz_en_kisa_ve_sadece_length():
     assert H.nodes[1] == {"x": 32.850, "y": 39.90}
 
 
-def test_birlestir_sinirda_kesintisiz_baglar():
-    # İki ilçe grafı ortak 2 numaralı düğümü (sınırı kesen yol) paylaşıyor
-    batı = nx.Graph()
-    batı.add_node(1, x=0.0, y=0.0)
-    batı.add_node(2, x=1.0, y=0.0)
-    batı.add_edge(1, 2, length=100.0)
-    doğu = nx.Graph()
-    doğu.add_node(2, x=1.0, y=0.0)
-    doğu.add_node(3, x=2.0, y=0.0)
-    doğu.add_edge(2, 3, length=50.0)
-    doğu.add_edge(1, 2, length=80.0)  # aynı kenar, farklı sadeleştirmeden daha kısa
-
-    B = ag.birlestir([batı, doğu])
-
-    assert B.number_of_nodes() == 3
-    assert B[1][2]["length"] == 80.0
-    assert nx.shortest_path_length(B, 1, 3, weight="length") == 130.0
-
-
 def test_sade_graf_kaydet_oku(tmp_path):
     H = ag.sadelestir(_osmnx_grafi())
     yol = tmp_path / "sade.graphml"
@@ -71,7 +52,7 @@ def test_sade_graf_kaydet_oku(tmp_path):
     assert G.nodes[1]["x"] == pytest.approx(32.85)
 
 
-def test_ilce_agi_kur_erisim_degisiminde_kenari_boler(tmp_path):
+def test_ag_kur_erisim_degisiminde_kenari_boler(tmp_path):
     # 1-2-3 kamu yolu, 3-4-5 site içi özel yol; 3 sadece iki yolu birleştiriyor (derece 2)
     xml = tmp_path / "site.osm"
     dugumler = "".join(f'<node id="{i}" lat="39.9" lon="{32.85 + i * 0.001}"/>' for i in range(1, 6))
@@ -80,7 +61,7 @@ def test_ilce_agi_kur_erisim_degisiminde_kenari_boler(tmp_path):
         '<way id="10"><nd ref="1"/><nd ref="2"/><nd ref="3"/><tag k="highway" v="residential"/></way>'
         '<way id="20"><nd ref="3"/><nd ref="4"/><nd ref="5"/><tag k="highway" v="service"/>'
         '<tag k="access" v="private"/></way></osm>', encoding="utf-8")
-    G = ag.ilce_agi_kur(xml, tmp_path / "site.graphml")
+    G = ag.ag_kur(xml)
     assert set(G.nodes) == {1, 3, 5}  # kapı düğümü 3 korunur, 2 ve 4 sadeleşir
     H = ag.sadelestir(G)
     assert H[1][3]["ozel"] is False and H[3][5]["ozel"] is True
@@ -94,20 +75,26 @@ def test_sadelestir_kamu_kenari_ozelden_oncelikli():
     G.add_edge(1, 2, length=90.0)  # uzun ama kamu
     G.add_edge(2, 1, length=40.0, access=["private", "yes"])  # birleşmiş kenarda liste
     H = ag.sadelestir(G)
-    assert H[1][2] == {"length": 90.0, "ozel": False}
+    # kamu uzunluğu 1. aşama için; paralel özel bağlantının en kısası 2. aşama için saklanır
+    assert H[1][2] == {"length": 90.0, "ozel": False, "ozel_length": 40.0}
 
 
-def test_birlestir_ozel_onceligi_korunur():
-    a, b = nx.Graph(), nx.Graph()
-    for G in (a, b):
-        G.add_node(1, x=0.0, y=0.0)
-        G.add_node(2, x=1.0, y=0.0)
-    a.add_edge(1, 2, length=30.0, ozel=True)
-    b.add_edge(1, 2, length=80.0, ozel=False)
-    assert ag.birlestir([a, b])[1][2] == {"length": 80.0, "ozel": False}
+@pytest.mark.parametrize("sira", [[("ozel", 30.0), ("kamu", 80.0)], [("kamu", 80.0), ("ozel", 30.0)]])
+def test_kenar_ekle_sira_bagimsiz(sira):
+    H = nx.Graph()
+    for tur, L in sira:
+        ag._kenar_ekle(H, 1, 2, L, tur == "ozel")
+    assert H[1][2] == {"length": 80.0, "ozel": False, "ozel_length": 30.0}
+    assert ag.ozel_uzunluk(H[1][2]) == 30.0
 
 
-def test_ilce_agi_kur_xmlden_iki_yonlu_ve_tum_bilesenler(tmp_path):
+def test_ozel_uzunluk():
+    assert ag.ozel_uzunluk({"length": 50.0, "ozel": True}) == 50.0
+    assert ag.ozel_uzunluk({"length": 50.0, "ozel": False}) is None
+    assert ag.ozel_uzunluk({"length": 50.0, "ozel": False, "ozel_length": 20.0}) == 20.0
+
+
+def test_ag_kur_xmlden_iki_yonlu_ve_tum_bilesenler(tmp_path):
     xml = tmp_path / "ilce.osm"
     xml.write_text(
         "<?xml version='1.0' encoding='UTF-8'?>\n<osm version=\"0.6\" generator=\"test\">\n"
@@ -122,10 +109,8 @@ def test_ilce_agi_kur_xmlden_iki_yonlu_ve_tum_bilesenler(tmp_path):
         "</osm>\n",
         encoding="utf-8",
     )
-    cikti = tmp_path / "ilce_walk.graphml"
-    G = ag.ilce_agi_kur(xml, cikti)
+    G = ag.ag_kur(xml)
 
-    assert cikti.exists()
     assert set(G.nodes) == {1, 3, 8, 9}  # 2 ara düğüm, sadeleştirmede kalkar
     assert G.has_edge(1, 3) and G.has_edge(3, 1)  # oneway=yes olsa da iki yönlü
     uzunluk = G[1][3][0]["length"]
