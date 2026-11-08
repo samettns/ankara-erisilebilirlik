@@ -12,6 +12,9 @@ yeniden boyar, bilgi kutusunu ve tesis noktalarını günceller.
 import html
 import json
 import math
+import shutil
+from pathlib import Path
+
 import folium
 import geopandas as gpd
 import h3
@@ -23,11 +26,11 @@ from jinja2 import Template
 
 try:
     from src.altigen import tesis_tablosu
-    from src.ayarlar import HEDEF_DIZINI, SINIR_DOSYASI, SOLUK_NUFUS_ESIGI, SONUC_DIZINI
+    from src.ayarlar import HEDEF_DIZINI, SINIR_DOSYASI, SOLUK_NUFUS_ESIGI, SONUC_DIZINI, YAYIN_HARITA_DOSYASI
     from src.mesafe import KATEGORILER
 except ModuleNotFoundError:
     from altigen import tesis_tablosu
-    from ayarlar import HEDEF_DIZINI, SINIR_DOSYASI, SOLUK_NUFUS_ESIGI, SONUC_DIZINI
+    from ayarlar import HEDEF_DIZINI, SINIR_DOSYASI, SOLUK_NUFUS_ESIGI, SONUC_DIZINI, YAYIN_HARITA_DOSYASI
     from mesafe import KATEGORILER
 
 ETIKETLER = {
@@ -53,6 +56,13 @@ YUZEY = "#fcfcfb"
 ONDALIK = 5  # ~1 m
 UST_SINIR_DK = 60  # bilgi kutusunda bunun üstü "60+ dk"
 SOLUK_OPAKLIK = 0.25  # nüfusu SOLUK_NUFUS_ESIGI'nin altındaki altıgenler
+# Veri atıfları (lisans gereği): Leaflet atıf kutusunda altlık atfının yanına eklenir
+VERI_ATIFLARI = (
+    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap katkıcıları</a> '
+    '(<a href="https://opendatacommons.org/licenses/odbl/">ODbL</a>)'
+    ' | Nüfus: <a href="https://www.worldpop.org/">WorldPop</a> '
+    '(<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>)'
+)
 
 
 def _bos_mu(dk) -> bool:
@@ -302,8 +312,9 @@ def harita_olustur(altigenler: pd.DataFrame, tesisler: pd.DataFrame, sinirlar: g
     harita = folium.Map(location=[(guney + kuzey) / 2, (bati + dogu) / 2], zoom_start=11, max_zoom=18,
                         tiles=None, prefer_canvas=True, control_scale=True)
     # Anahtar gerektirmeyen açık gri altlık (CartoDB artık API anahtarı istiyor)
-    folium.TileLayer(xyzservices.providers.Esri.WorldGrayCanvas, name="Altlık", control=False,
-                     max_native_zoom=16, max_zoom=18).add_to(harita)
+    altlik = xyzservices.providers.Esri.WorldGrayCanvas
+    folium.TileLayer(altlik, name="Altlık", control=False, max_native_zoom=16, max_zoom=18,
+                     attr=f"{altlik.html_attribution} | {VERI_ATIFLARI}").add_to(harita)
 
     # Radio düğmeleri: boş temel katmanlar; seçim JS'deki baselayerchange ile dinlenir
     for i, k in enumerate(kategoriler):
@@ -337,8 +348,22 @@ def harita_olustur(altigenler: pd.DataFrame, tesisler: pd.DataFrame, sinirlar: g
     return harita
 
 
+def kaydet(harita: folium.Map, cikti: Path, *kopyalar: Path) -> Path:
+    """Haritayı `cikti`ya yazar ve her `kopyalar` yoluna aynısını kopyalar (klasörleri açar).
+
+    docs/index.html kopyası GitHub Pages yayını içindir. Yazılan ana dosyanın yolunu döndürür.
+    """
+    cikti = Path(cikti)
+    cikti.parent.mkdir(parents=True, exist_ok=True)
+    harita.save(str(cikti))
+    for kopya in map(Path, kopyalar):
+        kopya.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(cikti, kopya)
+    return cikti
+
+
 def main() -> None:
-    """data/sonuclar/altigenler.parquet'ten data/sonuclar/harita.html üretir."""
+    """data/sonuclar/altigenler.parquet'ten data/sonuclar/harita.html üretir, docs/index.html'e kopyalar."""
     altigenler = pd.read_parquet(SONUC_DIZINI / "altigenler.parquet").set_index("h3")
     nufus_dosyasi = SONUC_DIZINI / "altigen_nufus.parquet"
     if nufus_dosyasi.exists():  # Faz 4 çıktısı: altıgen başına nüfus (ilçe parçaları toplanır)
@@ -346,10 +371,9 @@ def main() -> None:
     else:
         print("Uyarı: altigen_nufus.parquet yok, harita nüfussuz üretiliyor (önce: python -m src.nufus)")
     harita = harita_olustur(altigenler, tesis_tablosu(HEDEF_DIZINI), gpd.read_file(SINIR_DOSYASI))
-    cikti = SONUC_DIZINI / "harita.html"
-    harita.save(str(cikti))
+    cikti = kaydet(harita, SONUC_DIZINI / "harita.html", YAYIN_HARITA_DOSYASI)
     print(f"{cikti} ({cikti.stat().st_size / 2**20:.1f} MB, {int(altigenler['bagli'].sum()):,} renkli + "
-          f"{int((~altigenler['bagli']).sum())} gri altıgen)")
+          f"{int((~altigenler['bagli']).sum())} gri altıgen) -> kopyası {YAYIN_HARITA_DOSYASI}")
 
 
 if __name__ == "__main__":

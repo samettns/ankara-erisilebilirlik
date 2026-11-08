@@ -3,7 +3,8 @@
 ## Ağa bağlı olmayan parçalar: `sidewalk=separate` değil, `access=private`
 
 Faz 4'te nüfusu olduğu halde ana yürüme ağına bağlı olmayan altıgenler bulundu
-(88 altıgen, ~26.500 kişi; çoğu Çankaya'da Maltepe–Anıtkabir çevresi). İlk
+(güncel çıktıda 94 altıgen (87'si nüfuslu), 26.521 kişi, nüfusun %0,5'i; çoğu
+Çankaya'da Maltepe–Anıtkabir çevresi). İlk
 hipotez, kaldırımları ayrı çizilmiş caddelerin (`sidewalk=separate`) OSMnx'in
 `walk` filtresinde dışlanıp mahalleleri kopardığıydı. **Bu hipotez yanlış çıktı.**
 
@@ -60,15 +61,19 @@ Askerî alan, kampüs, sanayi vb. içindeki özel yollar dışarıda kalır.
 ### Sonuç: etkisi küçük, çünkü kopuk nüfus konut sitesinde değil
 
 Kesitteki 1.866 özel yolun 1.334'ü konut alanında kaldı ve eklendi (2.586 kenar);
-1.787 düğüm süresini site içi yoldan aldı. Önce/sonra:
+1.787 düğüm süresini site içi yoldan aldı (düzeltme sonrası güncel: 2.581 kenar,
+1.953 düğüm). Önce/sonra:
 
-| Metrik | Önce | Sonra | Fark |
-|---|---:|---:|---:|
-| Ağ parça sayısı | 557 | 459 | −98 |
-| Ana parça düğümü | 122.162 | 124.884 | +2.722 |
-| Ağa bağlı olmayan altıgen | 95 | 94 | −1 |
-| Nüfus: ağa bağlı olmayan altıgende | 26.550 | 26.521 | −29 |
-| Nüfus: süresi bilinen | 4.890.773 | 4.890.882 | +109 |
+| Metrik | Önce | Sonra | Fark | Güncel¹ |
+|---|---:|---:|---:|---:|
+| Ağ parça sayısı | 557 | 459 | −98 | 458 |
+| Ana parça düğümü | 122.162 | 124.884 | +2.722 | 124.633 |
+| Ağa bağlı olmayan altıgen | 95 | 94 | −1 | 94 (87'si nüfuslu) |
+| Nüfus: ağa bağlı olmayan altıgende | 26.550 | 26.521 | −29 | 26.521 |
+| Nüfus: süresi bilinen | 4.890.773 | 4.890.882 | +109 | 4.890.778 |
+
+¹ Aşağıdaki ilçe grafı düzeltmesinden sonra, `data/sonuclar/` (`rapor.json`,
+`nufus_rapor.json`, `once_sonra_metrikler.csv`).
 
 Nüfus ağırlıklı medyanlar 0,1 dk'dan az değişti; 15 dk dışında kalan nüfus en
 fazla 0,1 puan oynadı. Nedeni: ağa bağlı olmayan en kalabalık 10 altıgen konut
@@ -127,6 +132,40 @@ değişmedi (raylı 35,18 → 35,16 dk). 15 dk dışında kalan nüfus azaldı: 
 (raylı −1.176) ve Yenimahalle (hastane −1.033, raylı −880). Oranlar en fazla
 0,04 puan değişti.
 
+## Doğrulama: süper kaynaklı Dijkstra = tesis başına ayrı Dijkstra
+
+Sanal süper kaynak hilesinin (kategori başına tek Dijkstra + öncül zinciri) doğru
+sonuç verdiği gerçek ağda kaba kuvvetle sınandı (`python -m src.dogrulama`,
+`src/dogrulama.py`). Kaba kuvvet süper kaynak kullanmaz:
+
+- Her bağlanan tesis noktası için kamuya açık ağda **ayrı bir Dijkstra** çalışır;
+  noktanın süresi bağlantı mesafesi + ağ mesafesidir, tesisin süresi noktalarının
+  en küçüğüdür (hastane kampüs noktaları, metro girişleri).
+- Site içi (yalnızca özel yoldan ulaşılan) düğümlerde süre, kapılardaki kamu süresi +
+  kapıdan düğüme site içi mesafenin en küçüğüdür (aynı 2. aşama grafı).
+- En yakın tesis tüm tesisler arasından seçilir; eşit süreli tesis varsa süper
+  kaynağın seçtiği tesisin süresi en kısaya eşitse doğru sayılır.
+
+Örnek: 7 ilçe içinden rastgele 300 düğüm + 50 site içi düğüm (tohum 42; tekrarsız
+350 düğüm, 58'i site içi). Toplam 2.956 Dijkstra, ~16 dk.
+
+| Kategori | Tesis | Dijkstra (nokta) | Süre aynı | En yakın tesis aynı | En büyük fark |
+|---|---:|---:|---:|---:|---:|
+| Eczane | 1.603 | 1.603 | 350/350 | 350/350 | 2,8·10⁻¹⁴ dk |
+| Hastane | 100 | 947 | 350/350 | 350/350 | 5,7·10⁻¹⁴ dk |
+| Birinci basamak | 195 | 195 | 350/350 | 350/350 | 5,7·10⁻¹⁴ dk |
+| Metro / Ankaray | 54 | 187 | 350/350 | 350/350 | 5,7·10⁻¹⁴ dk |
+| Başkentray | 24 | 24 | 350/350 | 350/350 | 5,7·10⁻¹⁴ dk |
+
+Farklar kayan nokta toplama sırasından (tolerans 10⁻⁹ dk). En yakın tesisin kimliği
+350 düğümün hepsinde iki yöntemde birebir aynı (eşitlik nedeniyle farklı tesis
+seçilen düğüm çıkmadı). Ayrıntı: `data/sonuclar/kaba_kuvvet.json` ve `.csv`.
+
+Aynı karşılaştırma `tests/test_dogrulama.py` içinde küçük graflarda test olarak
+duruyor: 12 rastgele graf (tamsayı uzunluklar, %20 özel kenar, paralel özel
+bağlantılar, çok noktalı tesisler, bağlanmayan noktalar) ve elle hesaplanan bir
+site içi örneği.
+
 ## Bilerek dokunulmayanlar
 
 - **Askerî lojmanlar (ör. M.S.B. Lojmanları):** OSM'de `landuse=military` olduğu
@@ -137,7 +176,7 @@ değişmedi (raylı 35,18 → 35,16 dk). 15 dk dışında kalan nüfus azaldı: 
   bunları bilerek dışlıyor; birlikte ~580 düğümü bağlıyorlar. Standart filtreye
   sadık kalındı.
 - **Piksel düzeyinde süre:** İçinde yol düğümü olmayan ama nüfusu olan
-  altıgenler (~86.000 kişi, nüfusun %1,7'si) süresiz kalıyor. Bunun %80,7'si
+  altıgenler (5.087 altıgen, 86.033 kişi, nüfusun %1,7'si) süresiz kalıyor. Bunun %80,7'si
   bağlı bir altıgenin bitişiğinde; yani çoğu, bloğu çevreleyen yolların
   düğümlerinin komşu altıgene düşmesinden kaynaklanan geometrik bir etki.
   Pikselleri doğrudan ağa bağlamak bunu kapatır; şimdilik kapsam dışı.

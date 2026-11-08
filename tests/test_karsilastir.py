@@ -41,3 +41,24 @@ def test_ozet_metrikleri_dosyalardan(tmp_path):
     assert m["ağ: parça sayısı"] == 5 and m["ağ: konut sitesi özel kenarı"] == 3
     assert m["altıgen: ağa bağlı olmayan"] == 1
     assert m["nüfus: düğümsüz altıgende"] == 40 and m["nüfus: süresi bilinen (kapsanan)"] == 948
+
+
+def test_cli_argumansiz_anlasilir_hata(capsys):
+    assert karsilastir.cli([]) == 2
+    hata = capsys.readouterr().err
+    assert "hiç verilmedi" in hata and "Kullanım: python -m src.karsilastir ONCEKI_DIZIN SONRAKI_DIZIN" in hata
+
+
+def test_cli_tek_arguman_hata(capsys):
+    assert karsilastir.cli(["data/sonuclar"]) == 2
+    assert "1 verildi" in capsys.readouterr().err
+
+
+def test_cli_eksik_klasor_ve_dosya(tmp_path, capsys):
+    (tmp_path / "sonra").mkdir()
+    (tmp_path / "sonra" / "rapor.json").write_text("{}", encoding="utf-8")
+    assert karsilastir.cli([str(tmp_path / "yok"), str(tmp_path / "sonra")]) == 2
+    hata = capsys.readouterr().err
+    assert "önceki klasörü" in hata and "yok" in hata
+    sonraki = next(s for s in hata.splitlines() if "sonraki klasörü" in s)
+    assert "eksik dosya: nufus_rapor.json, altigenler.parquet, nufus_ozet.csv" in sonraki

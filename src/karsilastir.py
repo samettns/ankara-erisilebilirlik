@@ -1,8 +1,10 @@
 """İki sonuç klasörünü (önce/sonra) karşılaştırır: ağ, veri boşluğu ve nüfus ağırlıklı sonuçlar.
 
-Çalıştırma (proje kökünden):
-    python -m src.karsilastir                      # data/sonuclar_onceki -> data/sonuclar
+Çalıştırma (proje kökünden; iki klasör de zorunlu):
     python -m src.karsilastir ONCEKI_DIZIN SONRAKI_DIZIN
+    # örnek: python -m src.karsilastir data/sonuclar_onceki data/sonuclar
+
+Önceki klasör, yöntemi değiştirmeden önce data/sonuclar'ın bir kopyasıdır.
 """
 
 import json
@@ -12,12 +14,20 @@ from pathlib import Path
 import pandas as pd
 
 try:
-    from src.ayarlar import SONUC_DIZINI, VERI_DIZINI
+    from src.ayarlar import SONUC_DIZINI
 except ModuleNotFoundError:
-    from ayarlar import SONUC_DIZINI, VERI_DIZINI
+    from ayarlar import SONUC_DIZINI
 
-ONCEKI_DIZIN = VERI_DIZINI / "sonuclar_onceki"
 TOPLAM = "7 ilçe toplamı"
+GEREKEN_DOSYALAR = ["rapor.json", "nufus_rapor.json", "altigenler.parquet", "nufus_ozet.csv"]
+KULLANIM = """Kullanım: python -m src.karsilastir ONCEKI_DIZIN SONRAKI_DIZIN
+
+İki sonuç klasörü gerekir: önceki (karşılaştırma tabanı) ve sonraki (yeni hesap).
+Örnek akış:
+  1. Yöntemi değiştirmeden önce data/sonuclar klasörünü kopyala (ör. data/sonuclar_onceki)
+  2. Hesapları yeniden çalıştır (python -m src.mesafe, src.altigen, src.nufus)
+  3. python -m src.karsilastir data/sonuclar_onceki data/sonuclar
+Her klasörde şu dosyalar olmalı: """ + ", ".join(GEREKEN_DOSYALAR)
 
 
 def _json(yol: Path) -> dict:
@@ -65,7 +75,34 @@ def sonuc_tablosu(onceki: pd.DataFrame, sonraki: pd.DataFrame) -> pd.DataFrame:
     return t
 
 
-def main(onceki: Path = ONCEKI_DIZIN, sonraki: Path = SONUC_DIZINI) -> None:
+def eksik_dosyalar(dizin: Path) -> list[str]:
+    """Bir sonuç klasöründe karşılaştırma için eksik olan dosyaların adları (klasör yoksa hepsi)."""
+    return [d for d in GEREKEN_DOSYALAR if not (Path(dizin) / d).is_file()]
+
+
+def cli(argv: list[str]) -> int:
+    """Komut satırı girişi: argümanları ve klasörleri denetler, main'i çalıştırır; çıkış kodu döner.
+
+    Argüman sayısı yanlışsa kullanım mesajı, klasör/dosya eksikse hangisinin eksik
+    olduğu stderr'e yazılır ve 2 döner.
+    """
+    if len(argv) != 2:
+        sayi = f"{len(argv)} verildi." if argv else "hiç verilmedi."
+        print(f"Hata: iki klasör bekleniyordu, {sayi}\n\n{KULLANIM}", file=sys.stderr)
+        return 2
+    onceki, sonraki = Path(argv[0]), Path(argv[1])
+    hatalar = [f"{ad} klasörü ({dizin}): " + ("yok" if not dizin.is_dir() else "eksik dosya: " + ", ".join(eksik))
+               for ad, dizin in [("önceki", onceki), ("sonraki", sonraki)]
+               if (eksik := eksik_dosyalar(dizin))]
+    if hatalar:
+        satirlar = "\n  ".join(hatalar)
+        print(f"Hata:\n  {satirlar}\n\n{KULLANIM}", file=sys.stderr)
+        return 2
+    main(onceki, sonraki)
+    return 0
+
+
+def main(onceki: Path, sonraki: Path = SONUC_DIZINI) -> None:
     """Karşılaştırmayı basar ve sonraki klasöre once_sonra_*.csv olarak yazar."""
     pd.set_option("display.width", 220)
     pd.set_option("display.max_columns", 20)
@@ -88,7 +125,4 @@ def main(onceki: Path = ONCEKI_DIZIN, sonraki: Path = SONUC_DIZINI) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3:
-        main(Path(sys.argv[1]), Path(sys.argv[2]))
-    else:
-        main()
+    sys.exit(cli(sys.argv[1:]))

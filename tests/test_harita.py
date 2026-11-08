@@ -122,6 +122,18 @@ def test_harita_olustur_html(tmp_path):
         # folium katman adlarını JSON içinde \\u kaçışlı yazar; iki biçim de kabul
         assert parca in metin or json.dumps(parca)[1:-1] in metin, parca
     assert "World_Light_Gray_Base" in metin and "cartocdn" not in metin
+    # Lisans atıfları: Esri altlığı + OSM (ODbL) + WorldPop (CC BY 4.0)
+    for atif in ["Esri", "openstreetmap.org/copyright", "ODbL", "WorldPop", "CC BY 4.0"]:
+        assert atif in metin or json.dumps(atif)[1:-1] in metin, atif
     for renk in harita.RENKLER:
         assert renk in metin
     assert metin.count('"type":"Feature"') >= 3  # 1 altıgen + 2 tesis (kısa JSON)
+
+
+def test_kaydet_ana_dosya_ve_yayin_kopyasi(tmp_path):
+    sinirlar = gpd.GeoDataFrame({"ilce": ["Çankaya"]}, geometry=[box(32.8, 39.9, 32.9, 39.95)], crs=4326)
+    tesisler = gpd.GeoDataFrame({"kategori": ["eczane"], "ad": ["E"]}, geometry=[Point(32.85, 39.92)], crs=4326)
+    h = harita.harita_olustur(_altigenler(), tesisler, sinirlar, KATEGORILER)
+    ana, kopya = tmp_path / "sonuclar" / "harita.html", tmp_path / "docs" / "index.html"
+    assert harita.kaydet(h, ana, kopya) == ana
+    assert ana.exists() and kopya.read_bytes() == ana.read_bytes()

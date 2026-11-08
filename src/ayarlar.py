@@ -13,6 +13,7 @@ GECICI_DIZIN = VERI_DIZINI / "tmp"  # geçici .osm XML dosyaları; iş bitince s
 SINIR_DOSYASI = VERI_DIZINI / "sinirlar.gpkg"
 BIRLESIK_AG_DOSYASI = VERI_DIZINI / "ankara_walk.graphml"
 VERI_SURUMU_DOSYASI = PROJE_KOKU / "veri_surumu.json"  # git'e girer, README için
+YAYIN_HARITA_DOSYASI = PROJE_KOKU / "docs" / "index.html"  # GitHub Pages kopyası, git'e girer
 
 # Yerel OSM verisi
 GEOFABRIK_URL = "https://download.geofabrik.de/europe/turkey-latest.osm.pbf"
